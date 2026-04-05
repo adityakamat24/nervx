@@ -1,0 +1,57 @@
+[project]
+name = "nervx"
+version = "0.1.0"
+description = "A codebase brain for AI coding assistants — pre-indexed navigation, blast radius, dead code detection"
+requires-python = ">=3.10"
+license = "MIT"
+readme = "README.md"
+authors = [
+    {name = "Aditya Kamat", email = "adityakamat007@gmail.com"},
+]
+keywords = ["cli", "code-intelligence", "static-analysis", "developer-tools", "claude"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+    "tree-sitter>=0.21.0",
+    "tree-sitter-python>=0.21.0",
+    "tree-sitter-javascript>=0.21.0",
+    "tree-sitter-typescript>=0.21.0",
+    "tree-sitter-java>=0.21.0",
+    "tree-sitter-go>=0.21.0",
+    "tree-sitter-rust>=0.21.0",
+    "tree-sitter-c>=0.21.0",
+    "tree-sitter-cpp>=0.21.0",
+    "tree-sitter-c-sharp>=0.21.0",
+    "tree-sitter-ruby>=0.21.0",
+]
+
+[project.optional-dependencies]
+watch = ["watchdog>=3.0.0"]
+
+[project.urls]
+Homepage = "https://github.com/adityakamat24/nervx"
+Repository = "https://github.com/adityakamat24/nervx"
+Issues = "https://github.com/adityakamat24/nervx/issues"
+
+[project.scripts]
+nervx = "nervx.cli.main:main"
+
+[tool.setuptools.package-data]
+"nervx.viz" = ["*.html"]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

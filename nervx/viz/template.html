@@ -1,0 +1,1176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nervx viz</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+/* ── Reset & Base ────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; background: #0f172a; color: #e2e8f0; }
+
+/* ── Layout ��─────────────────────────────────────────────── */
+#app { display: flex; flex-direction: column; height: 100vh; }
+#header { display: flex; align-items: center; justify-content: space-between; padding: 8px 16px; background: #1e293b; border-bottom: 1px solid #334155; min-height: 48px; }
+#header h1 { font-size: 15px; font-weight: 600; color: #94a3b8; }
+#header h1 span { color: #38bdf8; }
+.tabs { display: flex; gap: 4px; }
+.tab { padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; color: #94a3b8; background: transparent; border: 1px solid transparent; transition: all 0.2s; }
+.tab:hover { background: #334155; color: #e2e8f0; }
+.tab.active { background: #334155; color: #38bdf8; border-color: #38bdf8; }
+#search-box { padding: 6px 10px; border-radius: 6px; border: 1px solid #475569; background: #1e293b; color: #e2e8f0; font-size: 13px; width: 200px; outline: none; }
+#search-box:focus { border-color: #38bdf8; }
+#search-box::placeholder { color: #64748b; }
+
+#main { display: flex; flex: 1; overflow: hidden; }
+#canvas-container { flex: 1; position: relative; overflow: hidden; background: #0f172a; }
+#canvas-container svg { width: 100%; height: 100%; }
+
+/* ── Detail Panel ────────────────────────────────────────── */
+#detail-panel { width: 320px; background: #1e293b; border-left: 1px solid #334155; overflow-y: auto; padding: 16px; display: none; font-size: 13px; }
+#detail-panel.open { display: block; }
+#detail-panel h2 { font-size: 16px; font-weight: 600; color: #f1f5f9; margin-bottom: 4px; }
+#detail-panel .meta { color: #94a3b8; font-size: 12px; margin-bottom: 12px; }
+#detail-panel .section { margin-bottom: 14px; }
+#detail-panel .section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: #64748b; margin-bottom: 6px; border-bottom: 1px solid #334155; padding-bottom: 4px; }
+#detail-panel .sig { font-family: monospace; font-size: 12px; color: #7dd3fc; background: #0f172a; padding: 8px; border-radius: 4px; word-break: break-all; }
+#detail-panel .doc { color: #94a3b8; font-style: italic; font-size: 12px; line-height: 1.4; }
+#detail-panel .tag { display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 11px; background: #334155; color: #94a3b8; margin: 2px; }
+#detail-panel .edge-item { padding: 3px 0; color: #cbd5e1; font-size: 12px; }
+#detail-panel .edge-type { color: #64748b; font-size: 11px; }
+#detail-panel .warning-item { padding: 4px 8px; background: #451a03; border-left: 3px solid #f97316; color: #fdba74; font-size: 12px; margin-bottom: 4px; border-radius: 2px; }
+#detail-panel .btn { padding: 6px 12px; border-radius: 4px; border: 1px solid #475569; background: #334155; color: #e2e8f0; font-size: 12px; cursor: pointer; margin-right: 6px; }
+#detail-panel .btn:hover { background: #475569; }
+
+/* ── Controls ────��───────────────────────────────────────── */
+#controls { position: absolute; top: 8px; left: 8px; background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 10px; font-size: 12px; z-index: 10; }
+#controls label { display: block; padding: 3px 0; color: #94a3b8; cursor: pointer; }
+#controls input[type="range"] { width: 120px; }
+#controls .control-title { font-size: 11px; text-transform: uppercase; color: #64748b; margin: 8px 0 4px; }
+#controls .control-title:first-child { margin-top: 0; }
+
+/* ── Status Bar ──────────────────────────────────────────── */
+#status-bar { padding: 4px 16px; background: #1e293b; border-top: 1px solid #334155; font-size: 11px; color: #64748b; display: flex; gap: 16px; }
+
+/* ── Tooltip ───────���─────────────────────────────────────── */
+#tooltip { position: absolute; background: #1e293b; border: 1px solid #475569; border-radius: 6px; padding: 8px 12px; font-size: 12px; color: #e2e8f0; pointer-events: none; opacity: 0; transition: opacity 0.15s; z-index: 100; max-width: 300px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+#tooltip .tt-name { font-weight: 600; color: #f1f5f9; }
+#tooltip .tt-kind { color: #94a3b8; font-size: 11px; }
+#tooltip .tt-file { color: #7dd3fc; font-size: 11px; }
+#tooltip .tt-sig { font-family: monospace; font-size: 11px; color: #a5b4fc; margin-top: 4px; }
+
+/* ── Landing / Drop Zone ─────────────────────────────────── */
+#landing { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; text-align: center; }
+#landing h1 { font-size: 24px; color: #f1f5f9; margin-bottom: 8px; }
+#landing p { color: #94a3b8; margin-bottom: 24px; }
+#drop-zone { width: 400px; height: 200px; border: 2px dashed #475569; border-radius: 12px; display: flex; align-items: center; justify-content: center; color: #64748b; font-size: 14px; cursor: pointer; transition: all 0.2s; }
+#drop-zone:hover, #drop-zone.dragover { border-color: #38bdf8; color: #38bdf8; background: rgba(56,189,248,0.05); }
+#drop-zone input { display: none; }
+#landing .hint { margin-top: 16px; color: #475569; font-size: 12px; }
+
+/* ── Flow selector ───────────────────────────────────────── */
+#flow-selector { display: none; padding: 6px 10px; border-radius: 6px; border: 1px solid #475569; background: #1e293b; color: #e2e8f0; font-size: 13px; outline: none; max-width: 300px; }
+
+/* ── SVG styles ──────────────────────────────────────────── */
+.node-circle { cursor: pointer; stroke-width: 2; transition: opacity 0.3s; }
+.node-label { font-size: 10px; fill: #94a3b8; pointer-events: none; text-anchor: middle; }
+.edge-line { stroke-opacity: 0.15; fill: none; stroke-width: 0.8; }
+.edge-line.calls { stroke: #64748b; }
+.edge-line.imports { stroke: #64748b; stroke-dasharray: 4,2; }
+.edge-line.inherits { stroke: #a78bfa; stroke-dasharray: 6,3; stroke-width: 1.5; stroke-opacity: 0.35; }
+.edge-line.instantiates { stroke: #64748b; }
+.cluster-bg { fill-opacity: 0.08; stroke-opacity: 0.15; rx: 12; ry: 12; }
+.cluster-label { font-size: 12px; fill: #64748b; font-weight: 600; }
+
+/* ── Blast radius ────────────────────────────────────────── */
+.blast-ring { fill: none; stroke-width: 3; opacity: 0; }
+
+/* ── Flow highlight ──────────────────────────────────────── */
+.flow-edge { stroke: #facc15; stroke-width: 3; stroke-opacity: 0.9; fill: none; }
+.flow-badge { font-size: 10px; font-weight: bold; }
+
+/* ── Responsive ──────────────────────────────────────────── */
+@media (max-width: 768px) {
+  #detail-panel { width: 100%; height: 40vh; position: fixed; bottom: 0; left: 0; border-left: none; border-top: 1px solid #334155; z-index: 20; }
+  #controls { font-size: 11px; }
+}
+</style>
+</head>
+<body>
+
+<!-- Landing screen for standalone mode -->
+<div id="landing">
+  <h1>nervx <span style="color:#38bdf8">viz</span></h1>
+  <p>Interactive Codebase Explorer</p>
+  <div id="drop-zone">
+    Drop nervx-viz.json here or click to browse
+    <input type="file" id="file-input" accept=".json">
+  </div>
+  <div class="hint">Generate with: <code style="color:#7dd3fc">nervx viz .</code></div>
+</div>
+
+<!-- Main app (hidden until data loads) -->
+<div id="app" style="display:none">
+  <div id="header">
+    <h1>nervx <span>viz</span>: <span id="repo-name"></span></h1>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <select id="flow-selector"><option value="">Select a flow...</option></select>
+      <div class="tabs">
+        <div class="tab active" data-view="architecture" title="[1]">Architecture</div>
+        <div class="tab" data-view="blast" title="[2]">Blast Radius</div>
+        <div class="tab" data-view="flow" title="[3]">Flow Tracer</div>
+      </div>
+      <input type="text" id="search-box" placeholder="Search symbols... (/)" />
+    </div>
+  </div>
+
+  <div id="main">
+    <div id="canvas-container">
+      <div id="controls"></div>
+      <svg id="graph-svg"></svg>
+      <div id="tooltip"></div>
+    </div>
+    <div id="detail-panel"></div>
+  </div>
+
+  <div id="status-bar">
+    <span id="stat-nodes"></span>
+    <span id="stat-edges"></span>
+    <span id="stat-build"></span>
+    <span id="stat-filter"></span>
+  </div>
+</div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════════
+   nervx viz — Interactive Codebase Explorer
+   Standalone D3.js visualization. No build step, no React.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+// ── Global State ──────────────────────────────────────────────────────
+let DATA = null;
+let currentView = 'architecture';
+let selectedNode = null;
+let simulation = null;
+let svgGroup = null;
+let zoom = null;
+
+// In-memory indexes built on load
+let nodesById = {};
+let edgesFromSource = {};  // source -> [edge]
+let edgesToTarget = {};    // target -> [edge]
+let reverseAdj = {};       // for blast radius BFS (target -> [source])
+let moduleColors = {};
+
+// Filter state
+let filters = {
+  importanceMin: 0,
+  showCalls: true,
+  showImports: true,
+  showInherits: true,
+  showCochanges: false,
+  blastDepth: 3,
+  showUntested: false,
+};
+
+// Color palette
+const KIND_COLORS = {
+  class: '#6366f1',    // indigo
+  function: '#14b8a6', // teal
+  method: '#06b6d4',   // cyan
+  file: '#64748b',     // slate
+};
+const MODULE_PALETTE = [
+  '#6366f1','#14b8a6','#f59e0b','#ef4444','#8b5cf6',
+  '#ec4899','#06b6d4','#84cc16','#f97316','#0ea5e9',
+];
+
+// ── Data Loading ──────────────────────────────────────────────────────
+
+// Try to load from server (nervx viz mode)
+fetch('./nervx-viz.json')
+  .then(r => { if (!r.ok) throw new Error(r.status); return r.json(); })
+  .then(data => initApp(data))
+  .catch(() => {
+    // Show landing page for drag-and-drop
+    document.getElementById('landing').style.display = 'flex';
+  });
+
+// File input / drag-and-drop
+const dropZone = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('dragover');
+  const file = e.dataTransfer.files[0];
+  if (file) readFile(file);
+});
+fileInput.addEventListener('change', e => {
+  if (e.target.files[0]) readFile(e.target.files[0]);
+});
+
+function readFile(file) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const data = JSON.parse(e.target.result);
+      initApp(data);
+    } catch (err) {
+      alert('Invalid JSON file: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+}
+
+// ── Data Validation ──────��────────────────────────────────────────────
+
+function validateData(data) {
+  if (!data.meta || !data.meta.repo_name) {
+    console.warn('Missing meta.repo_name');
+    data.meta = data.meta || { repo_name: 'unknown', node_count: 0, edge_count: 0, build_time: '', stack: [] };
+  }
+  if (!Array.isArray(data.nodes) || data.nodes.length === 0) {
+    console.warn('No nodes in data');
+    return false;
+  }
+  if (!Array.isArray(data.edges)) data.edges = [];
+  if (!Array.isArray(data.concept_paths)) data.concept_paths = [];
+  if (!Array.isArray(data.cochanges)) data.cochanges = [];
+  if (!Array.isArray(data.patterns)) data.patterns = [];
+  if (!Array.isArray(data.hotspots)) data.hotspots = [];
+  if (!Array.isArray(data.modules)) data.modules = [];
+
+  // Drop edges with missing endpoints
+  const nodeIds = new Set(data.nodes.map(n => n.id));
+  const before = data.edges.length;
+  data.edges = data.edges.filter(e => nodeIds.has(e.source) && nodeIds.has(e.target));
+  if (data.edges.length < before) {
+    console.warn(`Dropped ${before - data.edges.length} edges with missing endpoints`);
+  }
+  return true;
+}
+
+// ── App Initialization ──────────────────────────────────────���─────────
+
+function initApp(data) {
+  if (!validateData(data)) {
+    alert('Empty graph. Run `nervx build` first.');
+    return;
+  }
+  DATA = data;
+
+  // Hide landing, show app
+  document.getElementById('landing').style.display = 'none';
+  document.getElementById('app').style.display = 'flex';
+
+  // Build indexes
+  buildIndexes();
+
+  // Setup UI
+  document.getElementById('repo-name').textContent = DATA.meta.repo_name;
+  const nodeLabel = DATA.meta.truncated
+    ? `${DATA.meta.viz_node_count} of ${DATA.meta.total_node_count} nodes (top by importance)`
+    : `${DATA.nodes.length} nodes`;
+  document.getElementById('stat-nodes').textContent = nodeLabel;
+  document.getElementById('stat-edges').textContent = `${DATA.edges.length} edges`;
+  document.getElementById('stat-build').textContent = DATA.meta.build_time ? `built ${DATA.meta.build_time.split('T')[0]}` : '';
+
+  // Populate flow selector
+  populateFlowSelector();
+
+  // Setup tabs
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => switchView(tab.dataset.view));
+  });
+
+  // Setup search
+  document.getElementById('search-box').addEventListener('input', onSearch);
+
+  // Setup keyboard shortcuts
+  document.addEventListener('keydown', onKeyDown);
+
+  // Init graph
+  initGraph();
+
+  // Parse URL hash
+  parseHash();
+}
+
+function buildIndexes() {
+  nodesById = {};
+  edgesFromSource = {};
+  edgesToTarget = {};
+  reverseAdj = {};
+
+  DATA.nodes.forEach(n => {
+    nodesById[n.id] = n;
+    n._x = 0; n._y = 0; // D3 will set these
+  });
+
+  DATA.edges.forEach(e => {
+    if (!edgesFromSource[e.source]) edgesFromSource[e.source] = [];
+    edgesFromSource[e.source].push(e);
+    if (!edgesToTarget[e.target]) edgesToTarget[e.target] = [];
+    edgesToTarget[e.target].push(e);
+    // Reverse adjacency for blast radius (who depends on target)
+    if (!reverseAdj[e.target]) reverseAdj[e.target] = [];
+    reverseAdj[e.target].push(e.source);
+  });
+
+  // Module colors
+  const modIds = DATA.modules.map(m => m.id);
+  modIds.forEach((id, i) => { moduleColors[id] = MODULE_PALETTE[i % MODULE_PALETTE.length]; });
+}
+
+// ── Graph Initialization ──────────────────────────────────────────────
+
+function initGraph() {
+  const svg = d3.select('#graph-svg');
+  const container = document.getElementById('canvas-container');
+  const width = container.clientWidth;
+  const height = container.clientHeight;
+
+  // Clear
+  svg.selectAll('*').remove();
+
+  // Zoom
+  zoom = d3.zoom()
+    .scaleExtent([0.1, 5])
+    .on('zoom', e => svgGroup.attr('transform', e.transform));
+  svg.call(zoom);
+
+  svgGroup = svg.append('g');
+
+  // Defs for arrows
+  const defs = svg.append('defs');
+  defs.append('marker')
+    .attr('id', 'arrowhead')
+    .attr('viewBox', '0 -5 10 10')
+    .attr('refX', 20).attr('refY', 0)
+    .attr('markerWidth', 6).attr('markerHeight', 6)
+    .attr('orient', 'auto')
+    .append('path').attr('d', 'M0,-4L10,0L0,4').attr('fill', '#475569');
+
+  // ── Adaptive layout parameters based on graph size ─────────
+  const totalNodes = DATA.nodes.length;
+  const nonFileNodes = DATA.nodes.filter(n => n.kind !== 'file');
+
+  // For large graphs, skip file nodes from rendering entirely
+  const renderNodes = totalNodes > 500
+    ? DATA.nodes.filter(n => n.kind !== 'file')
+    : DATA.nodes;
+
+  // Scale forces with graph size — more aggressive at higher tiers
+  let chargeStrength, linkDist, clusterStrength, collisionPad, simTicks;
+  if (totalNodes > 2000) {
+    chargeStrength = -150; linkDist = 60; clusterStrength = 0.3;
+    collisionPad = 4; simTicks = 200;
+  } else if (totalNodes > 1000) {
+    chargeStrength = -250; linkDist = 80; clusterStrength = 0.25;
+    collisionPad = 6; simTicks = 250;
+  } else if (totalNodes > 500) {
+    chargeStrength = -400; linkDist = 100; clusterStrength = 0.2;
+    collisionPad = 8; simTicks = 300;
+  } else if (totalNodes > 300) {
+    chargeStrength = -600; linkDist = 150; clusterStrength = 0.12;
+    collisionPad = 12; simTicks = 400;
+  } else if (totalNodes > 100) {
+    chargeStrength = -400; linkDist = 120; clusterStrength = 0.18;
+    collisionPad = 8; simTicks = 350;
+  } else {
+    chargeStrength = -250; linkDist = 90; clusterStrength = 0.25;
+    collisionPad = 5; simTicks = 250;
+  }
+
+  // For very large graphs, reduce charge distance to avoid O(N²) blowup
+  const chargeDistMax = totalNodes > 1000 ? 300 : 500;
+
+  // Compute module centroids — spread modules in a larger circle
+  const moduleCentroids = {};
+  const modCount = DATA.modules.length || 1;
+  // Bigger radius so modules don't overlap
+  const spreadRadius = Math.min(width, height) * (modCount > 3 ? 0.35 : 0.28);
+  DATA.modules.forEach((m, i) => {
+    const angle = (2 * Math.PI * i) / modCount - Math.PI / 2;
+    moduleCentroids[m.id] = {
+      x: width / 2 + spreadRadius * Math.cos(angle),
+      y: height / 2 + spreadRadius * Math.sin(angle),
+    };
+  });
+
+  // Node radius function
+  function nodeRadius(d) {
+    if (d.kind === 'file') return 3; // tiny for file nodes
+    const imp = d.importance || 0;
+    return Math.max(5, Math.min(28, 4 + Math.sqrt(imp) * 2));
+  }
+
+  // Custom cluster force — pulls nodes toward their module centroid
+  function clusterForce(alpha) {
+    renderNodes.forEach(d => {
+      const centroid = moduleCentroids[d.module];
+      if (centroid) {
+        d.vx += (centroid.x - d.x) * alpha * clusterStrength;
+        d.vy += (centroid.y - d.y) * alpha * clusterStrength;
+      }
+    });
+  }
+
+  // Build D3 force simulation — only include edges between rendered nodes
+  const renderNodeIds = new Set(renderNodes.map(n => n.id));
+  const edgeData = DATA.edges
+    .filter(e => renderNodeIds.has(e.source) && renderNodeIds.has(e.target))
+    .map(e => ({ source: e.source, target: e.target, type: e.type, weight: e.weight }));
+
+  // For very large graphs, limit edges to reduce rendering cost
+  const maxEdges = totalNodes > 1000 ? 3000 : totalNodes > 500 ? 5000 : Infinity;
+  if (edgeData.length > maxEdges) {
+    // Keep higher-weight edges and inherits/calls over imports
+    edgeData.sort((a, b) => {
+      const typePrio = { inherits: 3, calls: 2, imports: 1, instantiates: 1 };
+      return (typePrio[b.type] || 0) - (typePrio[a.type] || 0) || (b.weight || 1) - (a.weight || 1);
+    });
+    edgeData.length = maxEdges;
+  }
+
+  simulation = d3.forceSimulation(renderNodes)
+    .force('link', d3.forceLink(edgeData).id(d => d.id).distance(linkDist).strength(0.2))
+    .force('charge', d3.forceManyBody().strength(chargeStrength).distanceMax(chargeDistMax))
+    .force('center', d3.forceCenter(width / 2, height / 2).strength(0.05))
+    .force('collision', d3.forceCollide().radius(d => nodeRadius(d) + collisionPad).strength(0.8))
+    .force('cluster', clusterForce)
+    .alphaDecay(totalNodes > 1000 ? 0.04 : 0.02)
+    .velocityDecay(totalNodes > 1000 ? 0.4 : 0.3);
+
+  // Run synchronously for initial layout — more ticks for better convergence
+  simulation.stop();
+  for (let i = 0; i < simTicks; i++) simulation.tick();
+
+  // ── Render cluster backgrounds ───────────────────────────────
+  const clusterGroup = svgGroup.append('g').attr('class', 'clusters');
+  DATA.modules.forEach(m => {
+    const mNodes = renderNodes.filter(n => n.module === m.id);
+    if (mNodes.length === 0) return;
+    const xs = mNodes.map(n => n.x);
+    const ys = mNodes.map(n => n.y);
+    const pad = 40;
+    const x1 = Math.min(...xs) - pad, y1 = Math.min(...ys) - pad;
+    const x2 = Math.max(...xs) + pad, y2 = Math.max(...ys) + pad;
+    const color = moduleColors[m.id] || '#475569';
+
+    clusterGroup.append('rect')
+      .attr('class', 'cluster-bg')
+      .attr('x', x1).attr('y', y1)
+      .attr('width', x2 - x1).attr('height', y2 - y1)
+      .attr('fill', color).attr('stroke', color)
+      .attr('data-module', m.id);
+
+    clusterGroup.append('text')
+      .attr('class', 'cluster-label')
+      .attr('x', x1 + 8).attr('y', y1 + 16)
+      .text(`${m.label} (${m.node_count})`);
+  });
+
+  // ── Render edges ───���─────────────────────────────────────────
+  const edgeGroup = svgGroup.append('g').attr('class', 'edges');
+  const edgeElements = edgeGroup.selectAll('line')
+    .data(edgeData)
+    .join('line')
+    .attr('class', d => `edge-line ${d.type}`)
+    .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+    .attr('x2', d => d.target.x).attr('y2', d => d.target.y)
+    .attr('marker-end', 'url(#arrowhead)')
+    .attr('data-source', d => d.source.id || d.source)
+    .attr('data-target', d => d.target.id || d.target);
+
+  // ── Render nodes ──────────────────────────────────────────
+  const nodeGroup = svgGroup.append('g').attr('class', 'nodes');
+  const nodeElements = nodeGroup.selectAll('g')
+    .data(renderNodes)
+    .join('g')
+    .attr('transform', d => `translate(${d.x},${d.y})`)
+    .attr('data-id', d => d.id);
+
+  // Node circles
+  nodeElements.append('circle')
+    .attr('class', 'node-circle')
+    .attr('r', d => nodeRadius(d))
+    .attr('fill', d => KIND_COLORS[d.kind] || '#64748b')
+    .attr('stroke', d => {
+      if (d.kind === 'file') return 'transparent';
+      const warnings = d.warnings || [];
+      if (warnings.some(w => w.startsWith('NO_TESTS:') || w.startsWith('CONTRACT_CONFLICT:'))) return '#ef4444';
+      if (warnings.some(w => w.startsWith('ACTIVE_CHURN:'))) return '#f97316';
+      return 'transparent';
+    })
+    .attr('opacity', d => d.kind === 'file' ? 0.08 : 0.85);
+
+  // Warning badges (skip file nodes)
+  nodeElements.each(function(d) {
+    if (d.warnings && d.warnings.length > 0 && d.kind !== 'file') {
+      const r = nodeRadius(d);
+      d3.select(this).append('circle')
+        .attr('cx', r * 0.7).attr('cy', -r * 0.7)
+        .attr('r', 4).attr('fill', '#facc15');
+    }
+  });
+
+  // ── Smart labels with overlap avoidance ──────────────────────
+  // Sort nodes by importance descending, only show labels that don't overlap
+  const labelCandidates = renderNodes
+    .filter(d => d.kind !== 'file' && (d.importance || 0) > 0)
+    .sort((a, b) => (b.importance || 0) - (a.importance || 0));
+
+  // Adaptive: show top N labels based on graph size
+  let maxLabels, labelMinImportance;
+  if (totalNodes > 2000) {
+    maxLabels = 15; labelMinImportance = 20;
+  } else if (totalNodes > 1000) {
+    maxLabels = 20; labelMinImportance = 15;
+  } else if (totalNodes > 500) {
+    maxLabels = 25; labelMinImportance = 10;
+  } else if (totalNodes > 300) {
+    maxLabels = 30; labelMinImportance = 8;
+  } else if (totalNodes > 100) {
+    maxLabels = 50; labelMinImportance = 5;
+  } else {
+    maxLabels = 80; labelMinImportance = 3;
+  }
+
+  // Greedy label placement: only place label if it won't overlap existing ones
+  const placedLabels = [];
+  const LABEL_H = 12, LABEL_PAD = 4;
+
+  for (const d of labelCandidates) {
+    if ((d.importance || 0) < labelMinImportance) break;
+    if (placedLabels.length >= maxLabels) break;
+
+    const lx = d.x;
+    const ly = d.y + nodeRadius(d) + 12;
+    const lw = Math.min(d.name.length, 16) * 6; // approximate text width
+
+    // Check overlap with already placed labels
+    let overlaps = false;
+    for (const p of placedLabels) {
+      if (Math.abs(lx - p.x) < (lw + p.w) / 2 + LABEL_PAD &&
+          Math.abs(ly - p.y) < LABEL_H + LABEL_PAD) {
+        overlaps = true;
+        break;
+      }
+    }
+    if (!overlaps) {
+      placedLabels.push({ x: lx, y: ly, w: lw, id: d.id });
+    }
+  }
+
+  const labelSet = new Set(placedLabels.map(p => p.id));
+  nodeElements.filter(d => labelSet.has(d.id))
+    .append('text')
+    .attr('class', 'node-label')
+    .attr('dy', d => nodeRadius(d) + 12)
+    .text(d => d.name.length > 16 ? d.name.slice(0, 14) + '..' : d.name);
+
+  // ── Interactions ─────────────────────────────────────────────
+  const tooltip = d3.select('#tooltip');
+  let tooltipTimer;
+
+  nodeElements.on('mouseenter', (e, d) => {
+    clearTimeout(tooltipTimer);
+    tooltipTimer = setTimeout(() => {
+      tooltip.html(`
+        <div class="tt-name">${d.name}</div>
+        <div class="tt-kind">${d.kind} | importance: ${(d.importance||0).toFixed(1)}</div>
+        <div class="tt-file">${d.file}:${d.line_start}</div>
+        ${d.signature ? `<div class="tt-sig">${escHtml(d.signature)}</div>` : ''}
+      `);
+      const rect = document.getElementById('canvas-container').getBoundingClientRect();
+      tooltip.style('left', (e.clientX - rect.left + 12) + 'px')
+             .style('top', (e.clientY - rect.top - 10) + 'px')
+             .style('opacity', 1);
+    }, 200);
+  })
+  .on('mouseleave', () => {
+    clearTimeout(tooltipTimer);
+    tooltip.style('opacity', 0);
+  })
+  .on('click', (e, d) => {
+    e.stopPropagation();
+    selectNode(d);
+  });
+
+  // Click empty space to deselect
+  svg.on('click', () => {
+    selectedNode = null;
+    document.getElementById('detail-panel').classList.remove('open');
+    resetHighlights();
+  });
+
+  // Store references
+  window._nodeElements = nodeElements;
+  window._edgeElements = edgeElements;
+  window._nodeRadius = nodeRadius;
+  window._renderNodes = renderNodes;
+
+  // Build controls
+  buildControls();
+  applyView();
+}
+
+// ── View Switching ────────────────────────────────────────────────────
+
+function switchView(view) {
+  currentView = view;
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === view));
+  document.getElementById('flow-selector').style.display = view === 'flow' ? 'inline-block' : 'none';
+
+  if (view === 'blast' && selectedNode) {
+    applyBlastRadius(selectedNode);
+  } else if (view === 'flow') {
+    const sel = document.getElementById('flow-selector');
+    if (sel.value) applyFlowTrace(sel.value);
+    else resetHighlights();
+  } else {
+    resetHighlights();
+  }
+  buildControls();
+  updateHash();
+}
+
+// ── Architecture Map ──────────────────────────────────────────────────
+
+function applyView() {
+  resetHighlights();
+  applyFilters();
+}
+
+function applyFilters() {
+  if (!window._nodeElements) return;
+
+  window._nodeElements.select('.node-circle')
+    .attr('opacity', d => {
+      if (d.kind === 'file') return 0.08;
+      if ((d.importance || 0) < filters.importanceMin) return 0.08;
+      return 0.85;
+    });
+
+  window._nodeElements.select('text.node-label')
+    .attr('opacity', d => (d.importance || 0) < filters.importanceMin ? 0 : 1);
+
+  window._edgeElements
+    .attr('stroke-opacity', d => {
+      const type = d.type;
+      if (type === 'calls' && !filters.showCalls) return 0;
+      if (type === 'imports' && !filters.showImports) return 0;
+      if (type === 'inherits' && !filters.showInherits) return 0;
+      // Make edges to/from filtered-out nodes invisible
+      const sid = d.source.id || d.source;
+      const tid = d.target.id || d.target;
+      const sn = nodesById[sid], tn = nodesById[tid];
+      if (sn && (sn.importance || 0) < filters.importanceMin) return 0;
+      if (tn && (tn.importance || 0) < filters.importanceMin) return 0;
+      return type === 'inherits' ? 0.35 : 0.15;
+    });
+
+  const rendered = window._renderNodes || DATA.nodes;
+  const visible = rendered.filter(n => (n.importance || 0) >= filters.importanceMin && n.kind !== 'file').length;
+  document.getElementById('stat-filter').textContent = filters.importanceMin > 0 ? `showing ${visible} symbols (importance >= ${filters.importanceMin})` : '';
+}
+
+// ── Blast Radius ─────���────────────────────────────────────────────────
+
+function applyBlastRadius(node) {
+  if (currentView !== 'blast') return;
+
+  // BFS from node using reverse adjacency
+  const depth = filters.blastDepth || 3;
+  const visited = new Map(); // id -> depth
+  visited.set(node.id, 0);
+  let frontier = [node.id];
+
+  for (let d = 1; d <= depth; d++) {
+    const next = [];
+    for (const nid of frontier) {
+      const deps = reverseAdj[nid] || [];
+      for (const dep of deps) {
+        if (!visited.has(dep)) {
+          visited.set(dep, d);
+          next.push(dep);
+        }
+      }
+    }
+    frontier = next;
+  }
+
+  // Temporal coupling
+  const nodeFile = node.file;
+  const coupled = (DATA.cochanges || []).filter(c => c.file_a === nodeFile || c.file_b === nodeFile);
+
+  // Apply visual
+  window._nodeElements.select('circle')
+    .transition().duration(300)
+    .attr('opacity', d => {
+      if (d.id === node.id) return 1;
+      const dep = visited.get(d.id);
+      if (dep !== undefined) return Math.max(0.3, 1 - dep * 0.25);
+      return 0.08;
+    })
+    .attr('stroke', d => {
+      if (d.id === node.id) return '#38bdf8';
+      const dep = visited.get(d.id);
+      if (dep !== undefined) {
+        if (dep === 1) return '#60a5fa';
+        if (dep === 2) return '#93c5fd';
+        return '#bfdbfe';
+      }
+      return 'transparent';
+    })
+    .attr('stroke-width', d => d.id === node.id ? 4 : visited.has(d.id) ? 3 : 2);
+
+  window._nodeElements.select('text')
+    .attr('opacity', d => visited.has(d.id) ? 1 : 0.1);
+
+  window._edgeElements
+    .transition().duration(300)
+    .attr('stroke-opacity', d => {
+      const sid = d.source.id || d.source;
+      const tid = d.target.id || d.target;
+      if (visited.has(sid) && visited.has(tid)) return 0.6;
+      return 0.03;
+    });
+
+  // Show blast detail
+  showBlastDetail(node, visited, coupled);
+}
+
+function showBlastDetail(node, visited, coupled) {
+  const panel = document.getElementById('detail-panel');
+  const direct = [], indirect = [];
+  visited.forEach((depth, id) => {
+    if (id === node.id) return;
+    const n = nodesById[id];
+    if (!n) return;
+    if (depth === 1) direct.push(n);
+    else indirect.push(n);
+  });
+
+  let html = `<h2>Blast Radius: ${escHtml(node.name)}</h2>
+    <div class="meta">${escHtml(node.file)}:${node.line_start}</div>`;
+
+  if (direct.length) {
+    html += `<div class="section"><div class="section-title">Direct (${direct.length})</div>`;
+    direct.forEach(n => { html += `<div class="edge-item">${escHtml(n.name)} <span class="edge-type">${n.file}</span></div>`; });
+    html += '</div>';
+  }
+  if (indirect.length) {
+    html += `<div class="section"><div class="section-title">Indirect (${indirect.length})</div>`;
+    indirect.slice(0, 15).forEach(n => { html += `<div class="edge-item">${escHtml(n.name)} <span class="edge-type">${n.file}</span></div>`; });
+    if (indirect.length > 15) html += `<div class="edge-item">...and ${indirect.length - 15} more</div>`;
+    html += '</div>';
+  }
+  if (coupled.length) {
+    html += `<div class="section"><div class="section-title">Temporally Coupled</div>`;
+    coupled.forEach(c => {
+      const other = c.file_a === node.file ? c.file_b : c.file_a;
+      html += `<div class="edge-item">${escHtml(other)} <span class="edge-type">${Math.round(c.coupling * 100)}%</span></div>`;
+    });
+    html += '</div>';
+  }
+
+  // Tests in radius
+  const tests = [];
+  visited.forEach((_, id) => {
+    const n = nodesById[id];
+    if (n && n.tags && n.tags.includes('test')) tests.push(n);
+  });
+  if (tests.length) {
+    html += `<div class="section"><div class="section-title">Tests to Run (${tests.length})</div>`;
+    tests.forEach(n => { html += `<div class="edge-item">${escHtml(n.name)}</div>`; });
+    html += '</div>';
+  }
+
+  // Warnings
+  if (node.warnings && node.warnings.length) {
+    html += `<div class="section"><div class="section-title">Warnings</div>`;
+    node.warnings.forEach(w => { html += `<div class="warning-item">${escHtml(w)}</div>`; });
+    html += '</div>';
+  }
+
+  panel.innerHTML = html;
+  panel.classList.add('open');
+}
+
+// ── Flow Tracer ──────��────────────────────────────────────────────────
+
+function populateFlowSelector() {
+  const sel = document.getElementById('flow-selector');
+  if (!DATA.concept_paths || DATA.concept_paths.length === 0) return;
+
+  const chains = DATA.concept_paths.filter(p => p.type === 'call_chain');
+  const clusters = DATA.concept_paths.filter(p => p.type === 'domain_cluster');
+
+  if (chains.length) {
+    const grp = document.createElement('optgroup');
+    grp.label = 'Call Chains';
+    chains.forEach(p => {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = `${p.name} (${p.node_ids.length} nodes)`;
+      grp.appendChild(opt);
+    });
+    sel.appendChild(grp);
+  }
+  if (clusters.length) {
+    const grp = document.createElement('optgroup');
+    grp.label = 'Domain Clusters';
+    clusters.forEach(p => {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = `${p.name} (${p.node_ids.length} nodes)`;
+      grp.appendChild(opt);
+    });
+    sel.appendChild(grp);
+  }
+
+  sel.addEventListener('change', () => {
+    if (sel.value) applyFlowTrace(sel.value);
+    else resetHighlights();
+  });
+}
+
+function applyFlowTrace(pathId) {
+  const path = DATA.concept_paths.find(p => p.id === pathId);
+  if (!path) return;
+
+  const pathSet = new Set(path.node_ids);
+
+  // Dim everything, highlight path
+  window._nodeElements.select('circle')
+    .transition().duration(400)
+    .attr('opacity', d => pathSet.has(d.id) ? 1 : 0.06);
+
+  window._nodeElements.select('text')
+    .attr('opacity', d => pathSet.has(d.id) ? 1 : 0.05);
+
+  // Highlight path edges
+  window._edgeElements
+    .transition().duration(400)
+    .attr('stroke-opacity', d => {
+      const sid = d.source.id || d.source;
+      const tid = d.target.id || d.target;
+      if (pathSet.has(sid) && pathSet.has(tid)) return 0.9;
+      return 0.02;
+    })
+    .attr('stroke', d => {
+      const sid = d.source.id || d.source;
+      const tid = d.target.id || d.target;
+      return (pathSet.has(sid) && pathSet.has(tid)) ? '#facc15' : null;
+    })
+    .attr('stroke-width', d => {
+      const sid = d.source.id || d.source;
+      const tid = d.target.id || d.target;
+      return (pathSet.has(sid) && pathSet.has(tid)) ? 3 : 1;
+    });
+
+  // Add sequence badges
+  svgGroup.selectAll('.flow-badge').remove();
+  path.node_ids.forEach((nid, i) => {
+    const n = nodesById[nid];
+    if (!n) return;
+    const r = window._nodeRadius(n);
+    svgGroup.append('text')
+      .attr('class', 'flow-badge')
+      .attr('x', n.x - r - 6).attr('y', n.y - r - 4)
+      .attr('fill', '#facc15')
+      .text(i + 1);
+  });
+
+  // Show flow detail
+  showFlowDetail(path);
+  updateHash();
+}
+
+function showFlowDetail(path) {
+  const panel = document.getElementById('detail-panel');
+  let html = `<h2>Flow: ${escHtml(path.name)}</h2>
+    <div class="meta">Type: ${path.type} | ${path.node_ids.length} nodes</div>`;
+
+  html += '<div class="section">';
+  path.node_ids.forEach((nid, i) => {
+    const n = nodesById[nid];
+    if (!n) {
+      html += `<div class="edge-item" style="color:#64748b">${i + 1}. ${escHtml(nid)} (missing)</div>`;
+      return;
+    }
+    html += `<div class="edge-item" style="cursor:pointer" onclick="selectNode(window.DATA_NODES_BY_ID['${escAttr(nid)}'])">
+      <strong style="color:#facc15">${i + 1}.</strong>
+      ${escHtml(n.name)} <span class="edge-type">${n.file}:${n.line_start}</span>
+      ${n.signature ? `<div class="sig" style="margin:4px 0 8px;padding:4px 6px">${escHtml(n.signature)}</div>` : ''}
+    </div>`;
+  });
+  html += '</div>';
+
+  panel.innerHTML = html;
+  panel.classList.add('open');
+
+  // Expose for onclick
+  window.DATA_NODES_BY_ID = nodesById;
+}
+
+// ── Node Selection & Detail Panel ──��──────────────────────────────────
+
+function selectNode(d) {
+  selectedNode = d;
+
+  // Highlight selected
+  window._nodeElements.select('circle')
+    .attr('stroke', n => n.id === d.id ? '#38bdf8' : null)
+    .attr('stroke-width', n => n.id === d.id ? 4 : 2);
+
+  if (currentView === 'blast') {
+    applyBlastRadius(d);
+    return;
+  }
+
+  // Show detail panel
+  showNodeDetail(d);
+  updateHash();
+}
+window.selectNode = selectNode;
+
+function showNodeDetail(d) {
+  const panel = document.getElementById('detail-panel');
+  const tags = (d.tags || []).map(t => `<span class="tag">${escHtml(t)}</span>`).join('');
+
+  let html = `<h2>${escHtml(d.name)}</h2>
+    <div class="meta">${d.kind}${d.importance ? ` | importance: ${d.importance.toFixed(1)}` : ''}</div>
+    <div class="section">
+      <div style="color:#7dd3fc;font-size:12px">${escHtml(d.file)}:${d.line_start}-${d.line_end}</div>
+    </div>`;
+
+  if (d.signature) {
+    html += `<div class="section"><div class="section-title">Signature</div><div class="sig">${escHtml(d.signature)}</div></div>`;
+  }
+  if (d.docstring) {
+    html += `<div class="section"><div class="section-title">Docstring</div><div class="doc">${escHtml(d.docstring)}</div></div>`;
+  }
+  if (tags) {
+    html += `<div class="section"><div class="section-title">Tags</div>${tags}</div>`;
+  }
+
+  // Edges out
+  const edgesOut = edgesFromSource[d.id] || [];
+  if (edgesOut.length) {
+    html += `<div class="section"><div class="section-title">Edges Out (${edgesOut.length})</div>`;
+    edgesOut.slice(0, 20).forEach(e => {
+      const tid = e.target.id || e.target;
+      const tn = nodesById[tid];
+      html += `<div class="edge-item"><span class="edge-type">${e.type} &rarr;</span> ${escHtml(tn ? tn.name : tid)}</div>`;
+    });
+    if (edgesOut.length > 20) html += `<div class="edge-item">...and ${edgesOut.length - 20} more</div>`;
+    html += '</div>';
+  }
+
+  // Edges in
+  const edgesIn = edgesToTarget[d.id] || [];
+  if (edgesIn.length) {
+    html += `<div class="section"><div class="section-title">Edges In (${edgesIn.length})</div>`;
+    edgesIn.slice(0, 20).forEach(e => {
+      const sid = e.source.id || e.source;
+      const sn = nodesById[sid];
+      html += `<div class="edge-item"><span class="edge-type">${e.type} &larr;</span> ${escHtml(sn ? sn.name : sid)}</div>`;
+    });
+    if (edgesIn.length > 20) html += `<div class="edge-item">...and ${edgesIn.length - 20} more</div>`;
+    html += '</div>';
+  }
+
+  // Warnings
+  if (d.warnings && d.warnings.length) {
+    html += `<div class="section"><div class="section-title">Warnings</div>`;
+    d.warnings.forEach(w => { html += `<div class="warning-item">${escHtml(w)}</div>`; });
+    html += '</div>';
+  }
+
+  // Patterns
+  const patterns = (DATA.patterns || []).filter(p => p.node_id === d.id);
+  if (patterns.length) {
+    html += `<div class="section"><div class="section-title">Patterns</div>`;
+    patterns.forEach(p => { html += `<div class="edge-item"><strong>${p.pattern.toUpperCase()}</strong>: ${escHtml(p.implication)}</div>`; });
+    html += '</div>';
+  }
+
+  // Actions
+  html += `<div class="section" style="margin-top:12px">
+    <button class="btn" onclick="navigator.clipboard.writeText('${escAttr(d.file)}:${d.line_start}')">Copy Path</button>
+    <button class="btn" onclick="switchView('blast');selectNode(nodesById['${escAttr(d.id)}'])">Blast &rarr;</button>
+  </div>`;
+
+  panel.innerHTML = html;
+  panel.classList.add('open');
+}
+
+// ── Reset Highlights ──────────────────────────────────────────────────
+
+function resetHighlights() {
+  if (!window._nodeElements) return;
+
+  svgGroup.selectAll('.flow-badge').remove();
+
+  window._nodeElements.select('.node-circle')
+    .transition().duration(300)
+    .attr('opacity', d => d.kind === 'file' ? 0.08 : 0.85)
+    .attr('stroke', d => {
+      if (d.kind === 'file') return 'transparent';
+      const w = d.warnings || [];
+      if (w.some(x => x.startsWith('NO_TESTS:') || x.startsWith('CONTRACT_CONFLICT:'))) return '#ef4444';
+      if (w.some(x => x.startsWith('ACTIVE_CHURN:'))) return '#f97316';
+      return 'transparent';
+    })
+    .attr('stroke-width', 2);
+
+  window._nodeElements.select('text.node-label').attr('opacity', 1);
+
+  window._edgeElements
+    .transition().duration(300)
+    .attr('stroke-opacity', d => d.type === 'inherits' ? 0.35 : 0.15)
+    .attr('stroke', null)
+    .attr('stroke-width', d => d.type === 'inherits' ? 1.5 : 0.8);
+
+  applyFilters();
+}
+
+// ── Controls ──────────────────────────────────────────────────────────
+
+function buildControls() {
+  const el = document.getElementById('controls');
+
+  if (currentView === 'architecture') {
+    const maxImp = Math.max(30, ...DATA.nodes.map(n => n.importance || 0));
+    el.innerHTML = `
+      <div class="control-title">Edges</div>
+      <label><input type="checkbox" ${filters.showCalls?'checked':''} onchange="filters.showCalls=this.checked;applyFilters()"> Calls</label>
+      <label><input type="checkbox" ${filters.showImports?'checked':''} onchange="filters.showImports=this.checked;applyFilters()"> Imports</label>
+      <label><input type="checkbox" ${filters.showInherits?'checked':''} onchange="filters.showInherits=this.checked;applyFilters()"> Inherits</label>
+      <div class="control-title">Importance &ge; <span id="imp-val">${filters.importanceMin}</span></div>
+      <label><input type="range" min="0" max="${Math.ceil(maxImp)}" value="${filters.importanceMin}" oninput="filters.importanceMin=+this.value;applyFilters();document.getElementById('imp-val').textContent=this.value"></label>
+      <div style="color:#475569;font-size:11px;margin-top:4px">${(window._renderNodes||DATA.nodes).filter(n=>n.kind!=='file').length} symbols rendered${DATA.meta.truncated ? ' (truncated)' : ''}</div>
+    `;
+  } else if (currentView === 'blast') {
+    el.innerHTML = `
+      <div class="control-title">Blast Depth</div>
+      <label><input type="range" min="1" max="5" value="${filters.blastDepth}" oninput="filters.blastDepth=+this.value;this.nextElementSibling.textContent=this.value;if(selectedNode)applyBlastRadius(selectedNode)"> <span>${filters.blastDepth}</span></label>
+      <div class="control-title" style="margin-top:8px">Click a node to see its blast radius</div>
+    `;
+  } else if (currentView === 'flow') {
+    el.innerHTML = `
+      <div class="control-title">Select a flow from the dropdown above</div>
+    `;
+  }
+}
+
+// ── Search ───────���────────────────────────────────────────────────────
+
+function onSearch(e) {
+  const q = e.target.value.toLowerCase().trim();
+  if (!q) {
+    resetHighlights();
+    return;
+  }
+
+  window._nodeElements.select('circle')
+    .transition().duration(200)
+    .attr('opacity', d => {
+      if (d.kind === 'file') return 0.05;
+      return d.name.toLowerCase().includes(q) || d.id.toLowerCase().includes(q) ? 1 : 0.08;
+    });
+
+  window._nodeElements.select('text')
+    .attr('opacity', d => d.name.toLowerCase().includes(q) || d.id.toLowerCase().includes(q) ? 1 : 0.05);
+}
+
+// ── Keyboard Shortcuts ────────────────────────────────────────────────
+
+function onKeyDown(e) {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+
+  switch (e.key) {
+    case '1': switchView('architecture'); break;
+    case '2': switchView('blast'); break;
+    case '3': switchView('flow'); break;
+    case '/': e.preventDefault(); document.getElementById('search-box').focus(); break;
+    case 'Escape':
+      selectedNode = null;
+      document.getElementById('detail-panel').classList.remove('open');
+      document.getElementById('search-box').value = '';
+      resetHighlights();
+      break;
+    case '=': case '+':
+      if (zoom) d3.select('#graph-svg').transition().call(zoom.scaleBy, 1.3);
+      break;
+    case '-':
+      if (zoom) d3.select('#graph-svg').transition().call(zoom.scaleBy, 0.77);
+      break;
+    case '0':
+      if (zoom) d3.select('#graph-svg').transition().call(zoom.transform, d3.zoomIdentity);
+      break;
+  }
+}
+
+// ── URL Hash State ────────────────────────────────────────────────────
+
+function updateHash() {
+  const parts = [`view=${currentView}`];
+  if (selectedNode) parts.push(`node=${encodeURIComponent(selectedNode.id)}`);
+  if (currentView === 'blast' && filters.blastDepth !== 3) parts.push(`depth=${filters.blastDepth}`);
+  if (currentView === 'flow') {
+    const sel = document.getElementById('flow-selector');
+    if (sel.value) parts.push(`path=${encodeURIComponent(sel.value)}`);
+  }
+  window.location.hash = parts.join('&');
+}
+
+function parseHash() {
+  const hash = window.location.hash.slice(1);
+  if (!hash) return;
+  const params = {};
+  hash.split('&').forEach(p => {
+    const [k, v] = p.split('=');
+    if (k && v) params[k] = decodeURIComponent(v);
+  });
+
+  if (params.view) switchView(params.view);
+  if (params.depth) filters.blastDepth = parseInt(params.depth);
+  if (params.node) {
+    const n = nodesById[params.node];
+    if (n) selectNode(n);
+  }
+  if (params.path) {
+    const sel = document.getElementById('flow-selector');
+    sel.value = params.path;
+    applyFlowTrace(params.path);
+  }
+}
+
+// ── Utilities ─────���───────────────────────────────────────────────────
+
+function escHtml(s) {
+  if (!s) return '';
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function escAttr(s) {
+  return (s || '').replace(/'/g, "\\'").replace(/\\/g, '\\\\');
+}
+
+// Expose globals for inline handlers
+window.switchView = switchView;
+window.nodesById = nodesById;
+window.filters = filters;
+window.applyFilters = applyFilters;
+window.selectedNode = null;
+</script>
+</body>
+</html>
