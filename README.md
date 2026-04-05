@@ -30,6 +30,20 @@ nervx find --no-tests --importance-gt 20
 nervx viz .
 ```
 
+## Benchmarks
+
+Tested on [FastAPI](https://github.com/fastapi/fastapi) — 3 identical questions asked with and without nervx:
+
+| Metric | Without nervx | With nervx | Reduction |
+|--------|--------------|------------|-----------|
+| Tool calls | 93 | 56 | **-40%** |
+| Output tokens | 15,694 | 8,196 | **-48%** |
+| Grep searches | 63 | 22 | **-65%** |
+| API calls | 115 | 73 | **-37%** |
+| Peak context | 70,503 | 57,141 | **-19%** |
+
+nervx replaces dozens of blind grep/read cycles with pre-indexed lookups. Fewer tool calls, less token waste, faster answers.
+
 ## What It Does
 
 nervx parses your codebase with tree-sitter, builds a graph of every function, class, and method, then pre-computes:
