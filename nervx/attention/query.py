@@ -412,8 +412,10 @@ def find(
 
     # Pre-compute incoming usage map for dead code detection
     incoming_usage: dict[str, int] | None = None
+    classes_with_bases: set[str] = set()
     if dead:
         incoming_usage = _build_incoming_usage(store)
+        classes_with_bases = _build_class_has_bases(store)
 
     results = []
     for r in rows:
@@ -447,7 +449,7 @@ def find(
                 continue
 
         if dead:
-            if not _is_dead(node, tags, incoming_usage):
+            if not _is_dead(node, tags, incoming_usage, classes_with_bases):
                 continue
 
         results.append(node)
@@ -458,6 +460,8 @@ def find(
 # Tags that indicate a node is invoked by frameworks/runtime, not static callers
 _ALIVE_TAGS = frozenset({
     "entrypoint", "route_handler", "test", "callback", "dunder",
+    "property", "validator", "override", "overload", "hook",
+    "exported", "abstract", "classmethod", "static",
 })
 
 
@@ -472,23 +476,57 @@ def _build_incoming_usage(store: GraphStore) -> dict[str, int]:
     return incoming
 
 
-def _is_dead(node: dict, tags: list, incoming_usage: dict[str, int]) -> bool:
-    """Check if a node qualifies as dead code."""
+def _build_class_has_bases(store: GraphStore) -> set[str]:
+    """Build set of class node IDs that have base classes (potential overrides)."""
+    all_nodes = store.get_all_nodes()
+    classes_with_bases: set[str] = set()
+    for node in all_nodes:
+        if node["kind"] == "class":
+            tags = json.loads(node["tags"]) if isinstance(node["tags"], str) else node["tags"]
+            for t in tags:
+                if t.startswith("extends:"):
+                    classes_with_bases.add(node["id"])
+                    break
+    return classes_with_bases
+
+
+def _is_dead(
+    node: dict,
+    tags: list,
+    incoming_usage: dict[str, int],
+    classes_with_bases: set[str],
+) -> bool:
+    """Check if a node qualifies as dead code (conservative)."""
     # Skip file nodes
     if node["kind"] == "file":
         return False
 
-    # Skip nodes invoked by frameworks/runtime
+    # Skip nodes invoked by frameworks/runtime/language features
     if _ALIVE_TAGS & set(tags):
         return False
 
-    # Skip dunder methods (invoked implicitly by Python)
     name = node["name"]
+
+    # Skip dunder methods (invoked implicitly by Python)
     if name.startswith("__") and name.endswith("__"):
         return False
 
     # Skip main functions
     if name == "main":
+        return False
+
+    # Skip methods on classes that inherit from something —
+    # they could be overrides called via polymorphism
+    if node["kind"] == "method" and node.get("parent_id", "") in classes_with_bases:
+        return False
+
+    # Skip public methods of classes (could be API surface)
+    # Only flag private methods/functions as dead
+    if node["kind"] == "method" and not name.startswith("_"):
+        return False
+
+    # Skip data_model classes (Pydantic models, dataclasses etc.)
+    if node["kind"] == "class" and "data_model" in tags:
         return False
 
     # Dead = zero incoming usage edges

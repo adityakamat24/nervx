@@ -69,6 +69,23 @@ ROUTE_DECORATOR_KEYWORDS = frozenset({
     "route", "get", "post", "put", "delete", "patch", "api_view",
 })
 
+# ── Validator decorators (Pydantic, attrs, etc.) ─────────────────
+
+_VALIDATOR_DECORATORS = frozenset({
+    "validator", "field_validator", "root_validator", "model_validator",
+    "validate", "validates", "field_serializer", "model_serializer",
+    "computed_field",
+})
+
+# ── Hook/lifecycle decorators ────────────────────────────────────
+
+_HOOK_DECORATORS = frozenset({
+    "on_event", "listener", "receiver", "hookimpl", "hookspec",
+    "before_request", "after_request", "middleware",
+    "startup", "shutdown", "lifespan",
+    "event_handler", "signal",
+})
+
 # ── Data model base classes ────────────────────────────────────────
 
 DATA_MODEL_BASES = frozenset({
@@ -241,9 +258,18 @@ def parse_python(file_path: str, repo_root: str) -> ParseResult:
 
     result = ParseResult(file_path=rel_path, nodes=[file_node])
 
+    # Detect __all__ exports
+    exported_names = _extract_dunder_all(root)
+
     # Walk top-level children
     for child in root.children:
         _process_top_level(child, rel_path, file_node.id, result)
+
+    # Tag nodes that appear in __all__ as "exported"
+    if exported_names:
+        for node in result.nodes:
+            if node.name in exported_names:
+                node.tags.append("exported")
 
     # Build the error_handling summary dict
     for rc in result.raw_calls:
@@ -268,6 +294,31 @@ def _extract_module_docstring(root) -> str | None:
         # First non-comment, non-docstring statement means no module docstring
         return None
     return None
+
+
+def _extract_dunder_all(root) -> set[str]:
+    """Extract names from __all__ = [...] at module level."""
+    names: set[str] = set()
+    for child in root.children:
+        if child.type != "expression_statement":
+            continue
+        expr = child.children[0] if child.children else None
+        if expr is None or expr.type != "assignment":
+            continue
+        # Check left side is __all__
+        left = expr.child_by_field_name("left")
+        if left is None or _text(left) != "__all__":
+            continue
+        # Extract string elements from the list on the right
+        right = expr.child_by_field_name("right")
+        if right is None or right.type != "list":
+            continue
+        for elem in right.children:
+            if elem.type == "string":
+                val = _parse_string_content(elem)
+                if val:
+                    names.add(val)
+    return names
 
 
 # ── Top-level processing ───────────────────────────────────────────
@@ -556,8 +607,8 @@ def _compute_function_tags(func_name: str, is_async: bool, decorators: list[str]
     if func_name.startswith("test_") or func_name.startswith("Test"):
         tags.append("test")
 
-    # callback
-    if func_name.startswith("on_") or func_name.startswith("handle_"):
+    # callback (on_, _on_, handle_, _handle_ patterns)
+    if func_name.lstrip("_").startswith("on_") or func_name.lstrip("_").startswith("handle_"):
         tags.append("callback")
 
     # factory
@@ -587,8 +638,11 @@ def _compute_function_tags(func_name: str, is_async: bool, decorators: list[str]
                 tags.append("route_handler")
                 break
 
-        # property
+        # property / cached_property
         if dec == "property" or dec.endswith(".setter") or dec.endswith(".deleter"):
+            if "property" not in tags:
+                tags.append("property")
+        if dec in ("cached_property", "functools.cached_property"):
             if "property" not in tags:
                 tags.append("property")
 
@@ -603,6 +657,28 @@ def _compute_function_tags(func_name: str, is_async: bool, decorators: list[str]
         # abstract
         if dec == "abstractmethod" or dec.endswith(".abstractmethod"):
             tags.append("abstract")
+
+        # validator (Pydantic, attrs, etc.)
+        for vkw in _VALIDATOR_DECORATORS:
+            if vkw in dec_lower:
+                if "validator" not in tags:
+                    tags.append("validator")
+                break
+
+        # override
+        if dec in ("override", "typing.override", "typing_extensions.override"):
+            tags.append("override")
+
+        # overload
+        if dec in ("overload", "typing.overload", "typing_extensions.overload"):
+            tags.append("overload")
+
+        # event/signal/hook (framework lifecycle)
+        for hkw in _HOOK_DECORATORS:
+            if hkw in dec_lower:
+                if "hook" not in tags:
+                    tags.append("hook")
+                break
 
     return tags
 
