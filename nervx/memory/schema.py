@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     docstring TEXT,
     tags TEXT DEFAULT '[]',
     importance REAL DEFAULT 0.0,
+    importance_rank INTEGER DEFAULT 0,
     parent_id TEXT DEFAULT '',
     content_hash TEXT DEFAULT ''
 );
@@ -35,6 +36,7 @@ CREATE TABLE IF NOT EXISTS cochanges (
     total_commits_b INTEGER DEFAULT 0,
     last_co_commit TEXT,
     coupling_score REAL DEFAULT 0.0,
+    commit_ids TEXT DEFAULT '[]',
     PRIMARY KEY (file_a, file_b)
 );
 
@@ -122,4 +124,10 @@ REVERSE_EDGE_MAP = {
     "inherits": "inherited_by",
     "inherited_by": "inherits",
     "instantiates": None,
+    # C18: dispatches_to links an abstract/base method to each concrete
+    # override on a subclass. The reverse "dispatched_from" is the overriding
+    # method pointing back at its base method, which is handy for trace /
+    # callers when walking from a concrete implementation upward.
+    "dispatches_to": "dispatched_from",
+    "dispatched_from": "dispatches_to",
 }

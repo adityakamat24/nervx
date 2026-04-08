@@ -11,16 +11,20 @@ def bfs_path(
     store: GraphStore,
     source_id: str,
     target_id: str,
-    edge_type: str = "calls",
+    edge_type: str | tuple[str, ...] = "calls",
     max_depth: int = 6,
 ) -> list[str]:
     """Return the shortest path of node IDs from source to target, or [] if none.
 
-    ``edge_type`` controls which edge to traverse (``calls``, ``imports``,
-    ``inherits``, ...). BFS stops at ``max_depth`` hops.
+    ``edge_type`` controls which edge(s) to traverse. Accepts a single edge
+    type string (``"calls"``, ``"imports"``, ``"inherits"``, ...) or a tuple
+    of types for multi-edge traversal (used by trace's inheritance fallback).
+    BFS stops at ``max_depth`` hops.
     """
     if source_id == target_id:
         return [source_id]
+
+    allowed: tuple[str, ...] = (edge_type,) if isinstance(edge_type, str) else tuple(edge_type)
 
     visited: set[str] = {source_id}
     parents: dict[str, str] = {}
@@ -31,7 +35,7 @@ def bfs_path(
         if depth >= max_depth:
             continue
         for edge in store.get_edges_from(current):
-            if edge["edge_type"] != edge_type:
+            if edge["edge_type"] not in allowed:
                 continue
             nxt = edge["target_id"]
             if nxt in visited:

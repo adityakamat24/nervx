@@ -11,10 +11,11 @@ from nervx.memory.store import GraphStore
 
 
 def find_callers(
-    store: GraphStore, symbol_id: str, max_depth: int = 1
+    store: GraphStore, symbol_id: str, max_depth: int = 1,
+    pick: int | None = None,
 ) -> str:
     """Find all callers of a symbol up to `max_depth` (BFS layers)."""
-    node, error = resolve_symbol(store, symbol_id)
+    node, error = resolve_symbol(store, symbol_id, pick=pick)
     if node is None:
         return error
     symbol_id = node["id"]

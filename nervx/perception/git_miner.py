@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -9,6 +10,35 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from nervx.memory.store import GraphStore
+
+
+_GH_NOREPLY_RE = re.compile(
+    r"^(\d+\+)?(?P<handle>[A-Za-z0-9][A-Za-z0-9._-]*)@users\.noreply\.github\.com$"
+)
+
+
+def _normalize_author(raw: str) -> str:
+    """Clean up a git ``Name <email>`` string.
+
+    - Turns the GitHub noreply pattern ``1234567+alice@users.noreply.github.com``
+      into ``@alice`` so authorship reads naturally in diff/briefing output.
+    - Collapses whitespace.
+    """
+    raw = raw.strip()
+    if not raw:
+        return raw
+    # Pull out the email (last <...> token) and attempt handle extraction.
+    if "<" in raw and raw.endswith(">"):
+        name_part = raw[: raw.rfind("<")].strip()
+        email = raw[raw.rfind("<") + 1 : -1].strip()
+        m = _GH_NOREPLY_RE.match(email)
+        if m:
+            handle = m.group("handle")
+            # Prefer "Name (@handle)" when name is present, "@handle" otherwise.
+            return f"{name_part} (@{handle})" if name_part else f"@{handle}"
+        if not name_part:
+            return email
+    return raw
 
 # All supported source file extensions (must stay in sync with build.ALL_EXTENSIONS)
 _ALL_EXTENSIONS = (
@@ -84,6 +114,7 @@ class GitMiner:
                 total_commits_b=file_stats[fb]["total_commits"],
                 last_co_commit=data["last"],
                 coupling_score=data["coupling"],
+                commit_ids=data.get("commit_ids", []),
             )
 
     def _parse_git_log(self) -> list[Commit]:
@@ -93,7 +124,9 @@ class GitMiner:
                 [
                     "git", "log",
                     f"--max-count={self.max_commits}",
-                    "--format=COMMIT|%H|%ae|%aI",
+                    # %aN uses .mailmap when present and falls back to the
+                    # author name — cleaner attribution than raw emails.
+                    "--format=COMMIT|%H|%aN <%ae>|%aI",
                     "--name-only",
                 ],
                 cwd=self.repo_root,
@@ -117,8 +150,9 @@ class GitMiner:
                     commits.append(current)
                 parts = line.split("|", 3)
                 if len(parts) >= 4:
+                    author = _normalize_author(parts[2])
                     current = Commit(
-                        hash=parts[1], author=parts[2],
+                        hash=parts[1], author=author,
                         date=parts[3], files=[],
                     )
                 else:
@@ -181,9 +215,14 @@ class GitMiner:
     def _compute_cochanges(
         self, commits: list[Commit], file_stats: dict[str, dict],
     ) -> dict[tuple[str, str], dict]:
-        """Compute co-modification matrix from commits."""
+        """Compute co-modification matrix from commits.
+
+        Also collects the short commit hashes behind each pair so
+        ``nervx cochange --why`` can point at specific commits.
+        """
         pair_counts: Counter[tuple[str, str]] = Counter()
         pair_last: dict[tuple[str, str], str] = {}
+        pair_commits: dict[tuple[str, str], list[str]] = {}
 
         for commit in commits:
             files = commit.files
@@ -191,10 +230,12 @@ class GitMiner:
             if len(files) < 2 or len(files) > 15:
                 continue
 
+            short = commit.hash[:8]
             for i, fa in enumerate(files):
                 for fb in files[i + 1:]:
                     pair = (fa, fb) if fa < fb else (fb, fa)
                     pair_counts[pair] += 1
+                    pair_commits.setdefault(pair, []).append(short)
                     if pair not in pair_last:
                         pair_last[pair] = commit.date
                     else:
@@ -216,10 +257,13 @@ class GitMiner:
             if coupling < 0.2:
                 continue
 
+            # Cap stored hashes — anything above ~20 is just noise for display.
+            commit_list = pair_commits.get(pair, [])[:20]
             result[pair] = {
                 "count": count,
                 "coupling": round(coupling, 3),
                 "last": pair_last.get(pair, ""),
+                "commit_ids": commit_list,
             }
 
         return result

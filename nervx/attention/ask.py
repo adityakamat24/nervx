@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 from nervx.attention.fuzzy import resolve_symbol
+from nervx.attention.test_coverage import test_coverage_for
 from nervx.memory.store import GraphStore
 
 
@@ -130,22 +131,19 @@ def ask_has_tests(store: GraphStore, symbol: str) -> dict:
     node, err = resolve_symbol(store, symbol)
     if node is None:
         return {"op": "has_tests", "error": err}
-    row = store.conn.execute(
-        """
-        SELECT COUNT(*) AS cnt FROM edges e
-        JOIN nodes n ON e.source_id = n.id
-        WHERE e.target_id = ?
-          AND e.edge_type = 'calls'
-          AND n.tags LIKE '%"test"%'
-        """,
-        (node["id"],),
-    ).fetchone()
-    cnt = row["cnt"] if row else 0
+    cov = test_coverage_for(store, node["id"], max_hops=3)
     return {
         "op": "has_tests",
         "resolved_id": node["id"],
-        "result": cnt > 0,
-        "test_count": cnt,
+        # Back-compat: `result` = any coverage (direct or transitive).
+        "result": cov["direct_count"] > 0 or cov["transitive"],
+        "direct": cov["direct_count"] > 0,
+        "direct_count": cov["direct_count"],
+        "transitive": cov["transitive"],
+        "transitive_via": cov["transitive_via"],
+        "transitive_hops": cov["transitive_hops"],
+        # Legacy field kept for any callers parsing the old shape.
+        "test_count": cov["direct_count"],
     }
 
 
@@ -208,9 +206,14 @@ def format_ask(result: dict) -> str:
     if op == "callers_count":
         return str(result.get("count", 0))
     if op == "has_tests":
-        if result["result"]:
-            return f"yes ({result['test_count']} tests)"
-        return "no"
+        if result.get("direct"):
+            return f"direct: yes ({result['direct_count']} refs)"
+        if result.get("transitive"):
+            return (
+                f"direct: no; transitive: yes via `{result['transitive_via']}` "
+                f"({result['transitive_hops']} hops)"
+            )
+        return "direct: no; transitive: no (3-hop search)"
     return json.dumps(result)
 
 

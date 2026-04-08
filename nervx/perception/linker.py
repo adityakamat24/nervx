@@ -250,10 +250,98 @@ def resolve_inheritance(
     return edges
 
 
+def resolve_dispatches(
+    parse_results: list[ParseResult],
+    inheritance_edges: list[Edge],
+) -> list[Edge]:
+    """C18: link abstract/base methods to their concrete subclass overrides.
+
+    This is a *soft* pass intended to give ``trace`` visibility into
+    polymorphic dispatch that static call-linking can't resolve. For every
+    subclass -> base edge in ``inheritance_edges``, we walk the transitive
+    base chain and for each method on the subclass that shares its name with
+    a method on an ancestor we emit a ``dispatches_to`` edge pointing from
+    the ancestor method to the subclass override.
+
+    ``dispatches_to`` is deliberately distinct from ``calls`` so that strict
+    users (and ``trace --calls-only``) can ignore it. The reverse edge
+    ``dispatched_from`` is populated automatically by the store.
+    """
+    # Index nodes by ID for quick lookup and group methods by their parent class.
+    nodes_by_id: dict[str, Node] = {}
+    methods_by_class: dict[str, dict[str, Node]] = {}
+    for pr in parse_results:
+        for node in pr.nodes:
+            if node.kind == "file":
+                continue
+            nodes_by_id[node.id] = node
+            if node.kind == "method" and node.parent_id:
+                methods_by_class.setdefault(node.parent_id, {})[node.name] = node
+
+    # Build class -> list of direct base class IDs from inheritance edges.
+    class_bases: dict[str, list[str]] = {}
+    for e in inheritance_edges:
+        if e.edge_type != "inherits":
+            continue
+        class_bases.setdefault(e.source_id, []).append(e.target_id)
+
+    def _ancestor_chain(class_id: str) -> list[str]:
+        """Return transitive base classes of ``class_id`` (closest first)."""
+        seen: set[str] = set()
+        order: list[str] = []
+        frontier = list(class_bases.get(class_id, []))
+        while frontier:
+            nxt = frontier.pop(0)
+            if nxt in seen:
+                continue
+            seen.add(nxt)
+            order.append(nxt)
+            frontier.extend(class_bases.get(nxt, []))
+        return order
+
+    edges: list[Edge] = []
+    seen: set[tuple[str, str]] = set()
+
+    for subclass_id, subclass_methods in methods_by_class.items():
+        ancestors = _ancestor_chain(subclass_id)
+        if not ancestors:
+            continue
+        for method_name, concrete in subclass_methods.items():
+            # Dunders are usually not polymorphic in a useful sense (e.g.
+            # every subclass has __init__); skip to keep the edge count sane.
+            if method_name.startswith("__") and method_name.endswith("__"):
+                continue
+            for ancestor_id in ancestors:
+                ancestor_methods = methods_by_class.get(ancestor_id, {})
+                base_method = ancestor_methods.get(method_name)
+                if base_method is None:
+                    continue
+                if base_method.id == concrete.id:
+                    continue
+                key = (base_method.id, concrete.id)
+                if key in seen:
+                    continue
+                seen.add(key)
+                edges.append(Edge(
+                    source_id=base_method.id,
+                    target_id=concrete.id,
+                    edge_type="dispatches_to",
+                    weight=0.5,  # soft edge — lower weight than direct calls
+                    metadata={"via": ancestor_id},
+                ))
+                # Only link to the closest override in the ancestor chain,
+                # otherwise a single method on a deep base class would get
+                # flooded with every same-named method below it.
+                break
+
+    return edges
+
+
 def resolve_all(parse_results: list[ParseResult]) -> list[Edge]:
     """Resolve all calls, imports, and inheritance into edges."""
     symbol_index = build_symbol_index(parse_results)
     imports = resolve_imports(parse_results, symbol_index)
     calls = resolve_calls(parse_results, symbol_index)
     inheritance = resolve_inheritance(parse_results, symbol_index)
-    return imports + calls + inheritance
+    dispatches = resolve_dispatches(parse_results, inheritance)
+    return imports + calls + inheritance + dispatches

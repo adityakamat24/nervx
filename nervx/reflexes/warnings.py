@@ -6,6 +6,7 @@ import json
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+from nervx.attention.test_coverage import test_coverage_for
 from nervx.memory.store import GraphStore
 
 
@@ -14,6 +15,12 @@ class Warning:
     category: str  # HIGH_IMPACT, CONTRACT_CONFLICT, NO_TESTS, etc.
     node_id: str
     message: str
+    # C16 — provenance. Let callers distinguish "this is a strict graph
+    # query" from "this is a statistical heuristic" without re-reading the
+    # generator.
+    methodology: str = ""  # one-line description of how this is computed
+    confidence: str = "medium"  # "high" | "medium" | "low"
+    evidence: list[str] = field(default_factory=list)  # node_ids / facts
 
 
 @dataclass
@@ -37,91 +44,141 @@ def collect_warnings(store: GraphStore, node_ids: list[str]) -> list[Warning]:
             continue
 
         # HIGH_IMPACT: 5+ callers
-        called_by = [e for e in store.get_edges_to(nid) if e["edge_type"] == "called_by"]
-        # Wait — called_by edges have source=nid, target=caller (reverse convention)
-        # Actually let's check: if A calls B, we store (A,B,calls) and (B,A,called_by)
-        # So for B, called_by edges FROM B have targets = callers
         called_by_edges = [e for e in store.get_edges_from(nid) if e["edge_type"] == "called_by"]
         if len(called_by_edges) >= 5:
             callers = []
+            caller_ids: list[str] = []
             for e in called_by_edges[:8]:
                 cn = store.get_node(e["target_id"])
                 if cn:
                     callers.append(cn["name"])
+                    caller_ids.append(e["target_id"])
             warnings.append(Warning(
-                "HIGH_IMPACT", nid,
-                f"{node['name']} has {len(called_by_edges)} callers. "
-                f"Changes here affect: {', '.join(callers)}",
+                category="HIGH_IMPACT",
+                node_id=nid,
+                message=(
+                    f"{node['name']} has {len(called_by_edges)} callers. "
+                    f"Changes here affect: {', '.join(callers)}"
+                ),
+                methodology="count of `called_by` edges in the static call graph",
+                confidence="high",
+                evidence=caller_ids,
             ))
 
         # CONTRACT_CONFLICT
         if nid in store.get_contract_conflicts():
             contracts = store.get_contracts_for_function(nid)
             strategies = set()
+            caller_ids = []
             for c in contracts:
                 strategies.add(c["error_handling"])
+                if c.get("caller_id"):
+                    caller_ids.append(c["caller_id"])
             warnings.append(Warning(
-                "CONTRACT_CONFLICT", nid,
-                f"Callers of {node['name']} disagree on error handling: "
-                f"{', '.join(strategies)}",
+                category="CONTRACT_CONFLICT",
+                node_id=nid,
+                message=(
+                    f"Callers of {node['name']} disagree on error handling: "
+                    f"{', '.join(strategies)}"
+                ),
+                methodology="caller error-handling strategies diverge in the contracts table",
+                confidence="high",
+                evidence=caller_ids[:8],
             ))
 
-        # NO_TESTS: important node with no test coverage
+        # NO_TESTS: important node with no test coverage.
+        # Uses shared coverage helper: checks direct test-calls first, then BFS
+        # up called_by for a test-tagged ancestor (3 hops). Only fires when
+        # BOTH are absent — wrappers-tested-through-helpers no longer trip this.
         tags = json.loads(node["tags"]) if isinstance(node["tags"], str) else node["tags"]
         if node["importance"] > 5 and "test" not in tags:
-            has_test = False
-            # Check if any test node has an edge to this node
-            all_edges = store.get_edges_to(nid) + store.get_edges_from(nid)
-            for e in all_edges:
-                other_id = e["target_id"] if e["source_id"] == nid else e["source_id"]
-                other = store.get_node(other_id)
-                if other:
-                    other_tags = json.loads(other["tags"]) if isinstance(other["tags"], str) else other["tags"]
-                    if "test" in other_tags:
-                        has_test = True
-                        break
-            if not has_test:
+            cov = test_coverage_for(store, nid, max_hops=3)
+            if cov["direct_count"] == 0 and not cov["transitive"]:
                 warnings.append(Warning(
-                    "NO_TESTS", nid,
-                    f"{node['name']} (importance={node['importance']:.1f}) has no test coverage.",
+                    category="NO_TESTS",
+                    node_id=nid,
+                    message=(
+                        f"{node['name']} (importance={node['importance']:.1f}) has no tests "
+                        f"(checked direct calls + 3-hop transitive reach)."
+                    ),
+                    methodology=(
+                        "no direct call from a test-tagged node AND no test-tagged "
+                        "ancestor within 3 hops of called_by edges"
+                    ),
+                    confidence="medium",
+                    evidence=[f"importance={node['importance']:.1f}", "max_hops=3"],
                 ))
 
         # ACTIVE_CHURN
         file_stats = store.get_file_stats(node["file_path"])
         if file_stats and file_stats["commits_7d"] >= 3:
             warnings.append(Warning(
-                "ACTIVE_CHURN", nid,
-                f"{node['file_path']} changed {file_stats['commits_7d']} times in the last 7 days. "
-                f"Check for in-progress work.",
+                category="ACTIVE_CHURN",
+                node_id=nid,
+                message=(
+                    f"{node['file_path']} changed {file_stats['commits_7d']} "
+                    f"times in the last 7 days. Check for in-progress work."
+                ),
+                methodology="commits_7d from file_stats (git log over 7 days)",
+                confidence="high",
+                evidence=[f"commits_7d={file_stats['commits_7d']}"],
             ))
 
         # MULTI_AUTHOR
         if file_stats and file_stats["author_count"] >= 3:
             warnings.append(Warning(
-                "MULTI_AUTHOR", nid,
-                f"{node['file_path']} has {file_stats['author_count']} contributors.",
+                category="MULTI_AUTHOR",
+                node_id=nid,
+                message=(
+                    f"{node['file_path']} has {file_stats['author_count']} contributors."
+                ),
+                methodology="distinct author count from git log",
+                confidence="high",
+                evidence=[f"author_count={file_stats['author_count']}"],
             ))
 
-        # TEMPORAL_COUPLING
+        # TEMPORAL_COUPLING — B5: require at least 3 co-commits before
+        # reporting. Below that, the "coupling %" is statistical noise and
+        # misleads users into thinking unrelated files are load-bearing.
         cochanges = store.get_cochanges_for_file(node["file_path"])
-        coupled_files = []
+        coupled_files: list[str] = []
+        coupled_evidence: list[str] = []
         for cc in cochanges:
-            if cc["coupling_score"] >= 0.5:
+            count = cc.get("co_commit_count", 0) or 0
+            if cc["coupling_score"] >= 0.5 and count >= 3:
                 other = cc["file_b"] if cc["file_a"] == node["file_path"] else cc["file_a"]
-                coupled_files.append(f"{other} ({int(cc['coupling_score'] * 100)}%)")
+                coupled_files.append(
+                    f"{other} ({int(cc['coupling_score'] * 100)}%, {count} co-commits)"
+                )
+                coupled_evidence.append(
+                    f"{other}: {count} co-commits, coupling={cc['coupling_score']:.2f}"
+                )
         if coupled_files:
             warnings.append(Warning(
-                "TEMPORAL_COUPLING", nid,
-                f"Changes to {node['file_path']} usually also require changes to: "
-                f"{', '.join(coupled_files[:3])}",
+                category="TEMPORAL_COUPLING",
+                node_id=nid,
+                message=(
+                    f"Changes to {node['file_path']} usually also require changes to: "
+                    f"{', '.join(coupled_files[:3])}"
+                ),
+                methodology=(
+                    "file pairs with coupling_score >= 0.5 and co_commit_count >= 3 "
+                    "from git history (B5 sample-size guard)"
+                ),
+                confidence="medium",
+                evidence=coupled_evidence[:5],
             ))
 
         # PATTERN warnings
         patterns = store.get_patterns_for_node(nid)
         for p in patterns:
             warnings.append(Warning(
-                "PATTERN", nid,
-                p["implication"],
+                category="PATTERN",
+                node_id=nid,
+                message=p["implication"],
+                methodology=f"design-pattern detector: {p['pattern']}",
+                confidence="low",
+                evidence=[p["pattern"]],
             ))
 
     return warnings

@@ -15,22 +15,73 @@ def trace_path(
     target_symbol: str,
     include_source: bool = False,
     repo_root: str = ".",
+    calls_only: bool = False,
+    via_inheritance: bool = False,
+    pick_source: int | None = None,
+    pick_target: int | None = None,
 ) -> dict | str:
-    """Compute the shortest call path from source to target."""
-    src, err_s = resolve_symbol(store, source_symbol)
+    """Compute the shortest call path from source to target.
+
+    By default tries a strict ``calls``-only BFS first, and if that fails,
+    falls back to a second BFS that also walks ``inherits``/``inherited_by``
+    plus ``dispatches_to``/``dispatched_from`` edges — this catches the
+    "polymorphic dispatch through an abstract base" case that static
+    call-linking can't resolve. The fallback path is labelled as *soft* in
+    the output so callers don't treat it as a confirmed runtime path.
+
+    ``calls_only``      — disable the inheritance/dispatch fallback entirely.
+    ``via_inheritance`` — skip straight to the inheritance-aware BFS.
+    """
+    src, err_s = resolve_symbol(store, source_symbol, pick=pick_source)
     if src is None:
         return err_s
-    dst, err_t = resolve_symbol(store, target_symbol)
+    dst, err_t = resolve_symbol(store, target_symbol, pick=pick_target)
     if dst is None:
         return err_t
 
-    path = bfs_path(store, src["id"], dst["id"], edge_type="calls", max_depth=8)
+    path: list[str] = []
+    resolution: str = "calls"  # "calls" (strict) | "inheritance" (soft) | ""
+
+    if not via_inheritance:
+        path = bfs_path(store, src["id"], dst["id"], edge_type="calls", max_depth=8)
+        if path:
+            resolution = "calls"
+
+    if not path and not calls_only:
+        # Fallback: include inheritance + dispatches_to edges. This does NOT
+        # guarantee a runtime path; it's evidence that source reaches target
+        # through a base class (and possibly a polymorphic override) in the
+        # static graph.
+        path = bfs_path(
+            store,
+            src["id"],
+            dst["id"],
+            edge_type=(
+                "calls", "inherits", "inherited_by",
+                "dispatches_to", "dispatched_from",
+            ),
+            max_depth=8,
+        )
+        if path:
+            resolution = "inheritance"
+
     if not path:
         return {
             "found": False,
             "source": src["id"],
             "target": dst["id"],
-            "path": [],
+            "hops": [],
+            "length": 0,
+            "resolution": "",
+            "note": (
+                f"No static call path from {src['id']} to {dst['id']} "
+                f"(searched 8 hops on calls edges"
+                f"{'' if calls_only else ' + inheritance fallback'}).\n"
+                f"Note: nervx uses static name-resolution — polymorphic "
+                f"dispatch through abstract base classes may not be "
+                f"captured. For call-site evidence, try: "
+                f"nervx callers {dst['id'].split('::')[-1]}"
+            ),
         }
 
     hops: list[dict] = []
@@ -56,6 +107,7 @@ def trace_path(
         "target": dst["id"],
         "hops": hops,
         "length": len(hops),
+        "resolution": resolution,
     }
 
 
@@ -63,12 +115,25 @@ def format_trace(result: dict | str) -> str:
     if isinstance(result, str):
         return result
     if not result["found"]:
-        return f"No call path from {result['source']} to {result['target']}."
+        return result.get("note") or (
+            f"No call path from {result['source']} to {result['target']}."
+        )
 
-    lines: list[str] = [
-        f"## trace: {result['source']} → {result['target']}  ({result['length']} hops)",
-        "",
-    ]
+    resolution = result.get("resolution", "calls")
+    suffix = "" if resolution == "calls" else ", via inheritance"
+    header = (
+        f"## trace: {result['source']} → {result['target']}  "
+        f"({result['length']} hops{suffix})"
+    )
+    lines: list[str] = [header, ""]
+    if resolution == "inheritance":
+        lines.append(
+            "  ⚠ No direct static call path found. This is a SOFT path that "
+            "crosses inheritance edges — resolution depends on runtime "
+            "polymorphic dispatch and may not reflect the actual execution "
+            "path. Treat as evidence, not proof."
+        )
+        lines.append("")
     for i, hop in enumerate(result["hops"]):
         arrow = "  " if i == 0 else "  ↓ "
         loc = f"{hop['file_path']}:{hop['line_start']}"

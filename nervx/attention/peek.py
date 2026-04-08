@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 
 from nervx.attention.fuzzy import resolve_symbol
+from nervx.attention.test_coverage import test_coverage_for
 from nervx.memory.store import GraphStore
 
 
@@ -16,13 +17,14 @@ def peek_symbol(
     store: GraphStore,
     symbol_id: str,
     repo_root: str = ".",
+    pick: int | None = None,
 ) -> dict | str:
     """Return a structured preview of a symbol.
 
     On resolution failure returns an error string (the caller can detect
     with ``isinstance(result, str)``).
     """
-    node, error = resolve_symbol(store, symbol_id)
+    node, error = resolve_symbol(store, symbol_id, pick=pick)
     if node is None:
         return error
 
@@ -44,22 +46,9 @@ def peek_symbol(
         1 for e in store.get_edges_to(nid) if e["edge_type"] == "calls"
     )
 
-    # Naive test-coverage probe: any node tagged "test" that calls this symbol.
-    test_count = 0
-    try:
-        row = store.conn.execute(
-            """
-            SELECT COUNT(*) AS cnt FROM edges e
-            JOIN nodes n ON e.source_id = n.id
-            WHERE e.target_id = ?
-              AND e.edge_type = 'calls'
-              AND n.tags LIKE '%"test"%'
-            """,
-            (nid,),
-        ).fetchone()
-        test_count = row["cnt"] if row else 0
-    except Exception:
-        test_count = 0
+    # Test-coverage probe — distinguishes direct calls from transitive reach
+    # so callers don't get false "no coverage" reports on wrapper-tested code.
+    coverage = test_coverage_for(store, nid, max_hops=3)
 
     # Tags (stored as JSON string in the DB row).
     raw_tags = node.get("tags") or "[]"
@@ -86,10 +75,12 @@ def peek_symbol(
         "signature": (node.get("signature") or "").strip(),
         "docstring_first_line": doc,
         "importance": float(node.get("importance") or 0.0),
+        "importance_rank": int(node.get("importance_rank") or 0),
         "callees": callees[:8],
         "callees_total": len(callees),
         "caller_count": caller_count,
-        "test_count": test_count,
+        "test_count": coverage["direct_count"],  # kept for back-compat in JSON
+        "test_coverage": coverage,
         "tags": notable,
     }
 
@@ -98,6 +89,8 @@ def format_peek(peek: dict | str) -> str:
     """Render a peek dict as the ~50-token preview text."""
     if isinstance(peek, str):
         return peek
+
+    from nervx.attention.test_coverage import format_coverage_hint
 
     loc = f"{peek['file_path']}:{peek['line_start']}-{peek['line_end']}"
     lines: list[str] = [f"## {peek['id']}  ({loc})"]
@@ -113,11 +106,15 @@ def format_peek(peek: dict | str) -> str:
         meta_parts.append(f"calls: {', '.join(peek['callees'])}{more}")
     lines.append(f"  [{', '.join(meta_parts)}]")
 
-    info = [f"importance={peek['importance']:.0f}", f"{peek['caller_count']} callers"]
-    if peek["test_count"] == 0:
-        info.append("no test coverage")
+    # Importance: show rank percentile when we have it (more meaningful than
+    # raw score, which is scale-dependent).
+    rank = peek.get("importance_rank") or 0
+    if rank > 0:
+        imp_display = f"importance={peek['importance']:.0f} (rank {rank})"
     else:
-        info.append(f"{peek['test_count']} test refs")
+        imp_display = f"importance={peek['importance']:.0f}"
+    info = [imp_display, f"{peek['caller_count']} callers"]
+    info.append(format_coverage_hint(peek["test_coverage"]))
     lines.append(f"  [{', '.join(info)}]")
 
     if peek["tags"]:

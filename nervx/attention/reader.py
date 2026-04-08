@@ -20,13 +20,14 @@ def read_symbol(
     context_depth: int = 0,
     repo_root: str = ".",
     since_hash: str = "",
+    pick: int | None = None,
 ) -> str:
     """Read the source code of a symbol and optionally its callees.
 
     If ``since_hash`` is provided and matches the stored content hash for
     the primary symbol, return the single token ``"unchanged"``.
     """
-    node, error = resolve_symbol(store, symbol_id)
+    node, error = resolve_symbol(store, symbol_id, pick=pick)
     if node is None:
         return error
 

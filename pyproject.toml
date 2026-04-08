@@ -1,6 +1,6 @@
 [project]
 name = "nervx"
-version = "0.2.1"
+version = "0.2.2"
 description = "A codebase brain for AI coding assistants — pre-indexed navigation, blast radius, dead code detection"
 requires-python = ">=3.10"
 license = "MIT"

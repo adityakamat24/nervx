@@ -51,10 +51,10 @@ def verify_statement(store: GraphStore, statement: str) -> dict | str:
 
     source_node, err_s = resolve_symbol(store, left)
     if source_node is None:
-        return err_s
+        return f"verify: could not resolve left-hand symbol '{left}'.\n{err_s}"
     target_node, err_t = resolve_symbol(store, right)
     if target_node is None:
-        return err_t
+        return f"verify: could not resolve right-hand symbol '{right}'.\n{err_t}"
 
     path = bfs_path(
         store,

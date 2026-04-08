@@ -18,7 +18,14 @@ from nervx.perception.languages import get_supported_extensions
 from nervx.perception.linker import resolve_all
 from nervx.perception.parser import extract_keywords, parse_file
 
-# Directories to exclude during file walk
+# Directories to exclude during file walk.
+#
+# The "noise" bucket (benchmark, third_party, examples, ...) is excluded by
+# default because their code is rarely what a user cares about when querying
+# the brain — and critically, they flood the importance-score distribution
+# with high-fanout dunder/vendored functions that crowd out real load-bearing
+# code. Users who want them indexed can add a negation to `.nervxignore`
+# (e.g. `!benchmark/`).
 EXCLUDE_DIRS = frozenset({
     "__pycache__", ".git", ".venv", "venv", "env", "node_modules",
     ".tox", ".mypy_cache", ".pytest_cache", ".eggs", "dist", "build",
@@ -33,8 +40,13 @@ EXCLUDE_DIRS = frozenset({
     # ("target" already included above)
     # Ruby
     ".bundle",
-    # General
+    # General noise
     ".idea", ".vscode", ".vs", "coverage", ".nyc_output",
+    # Noise bucket — rarely what users query for, floods importance distribution
+    "third_party", "third-party", "3rdparty", "thirdparty",
+    "benchmark", "benchmarks", "bench",
+    "examples", "example", "samples", "sample",
+    "fixtures", "testdata", "test_data",
 })
 
 # Files to exclude
@@ -51,6 +63,55 @@ MAX_FILE_SIZE = 500 * 1024
 # All supported source file extensions — driven by the language registry
 # so adding a language only requires updating nervx/perception/languages.py.
 ALL_EXTENSIONS = tuple(sorted(get_supported_extensions()))
+
+
+# C17: path-based categories. Exactly one category tag is assigned per node
+# based on its file path, and it's stored as ``category:<name>`` in the tags
+# list so existing tag-filter plumbing picks it up for free.
+#
+# Order matters: the first matching prefix or pattern wins. "core" is the
+# fallback when nothing else matches.
+_CATEGORY_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
+    # category, substrings that must appear as a path segment (or suffix)
+    ("vendor", ("/node_modules/", "/vendor/", "/third_party/",
+                "/3rdparty/", "/thirdparty/", "/third-party/")),
+    ("generated", ("/dist/", "/build/", "/.next/", "/target/", "/out/",
+                   ".min.js", ".min.css", ".bundle.js", ".generated.",
+                   "_pb.py", "_pb2.py", ".pb.go")),
+    ("test", ("/tests/", "/test/", "/__tests__/", "/spec/", "/specs/",
+              "_test.", ".test.", ".spec.", "test_", "_spec.")),
+    ("example", ("/examples/", "/example/", "/samples/", "/sample/",
+                 "/demos/", "/demo/")),
+    ("doc", ("/docs/", "/doc/", "/documentation/")),
+]
+
+
+def _derive_category(file_path: str) -> str:
+    """Return a single category name for a source file.
+
+    ``file_path`` is expected in forward-slash form. Missing slashes are
+    fine — we also check suffixes so patterns like ``_test.py`` still hit.
+    """
+    fp = file_path.replace("\\", "/").lower()
+    # Normalize so leading-segment patterns ("/tests/") work even when the
+    # path is relative and doesn't start with a slash.
+    normalized = "/" + fp if not fp.startswith("/") else fp
+    for category, patterns in _CATEGORY_PATTERNS:
+        for p in patterns:
+            if p.startswith("/") and p in normalized:
+                return category
+            if not p.startswith("/") and (p in fp or fp.endswith(p)):
+                # Suffix/substring pattern — check last path segment for
+                # `test_` / `_test.` prefixes so `controller_test.go` hits
+                # but `fast_testing_util.go` doesn't.
+                if p.startswith("_") or p.startswith(".") or p.endswith("."):
+                    return category
+                # Bare-prefix patterns like "test_" must be at the start of
+                # the basename, not buried mid-name.
+                base = fp.rsplit("/", 1)[-1]
+                if base.startswith(p):
+                    return category
+    return "core"
 
 
 def walk_files(repo_root: str, extensions: tuple[str, ...] = ALL_EXTENSIONS) -> list[str]:
@@ -198,19 +259,40 @@ def compute_symbol_hashes_and_strings(
 
 
 def compute_importance(store: GraphStore):
-    """Compute importance scores for all nodes.
+    """Compute importance scores and percentile ranks for all nodes.
 
-    Uses bulk in-memory computation instead of per-node queries.
+    Formula: `calls_in*2 + inherits_in*1.5 + imports_in*0.5 + cross_module*2
+              + is_exported + calls_out*0.5`.
+    Reverse edges (`called_by`/`inherited_by`/`imported_by`) are skipped to
+    avoid double-counting (they're just the inverse of forward edges).
+    Importance is a rough "should a human care about this symbol" signal,
+    not a correctness metric — use `importance_rank` (0-100 percentile) in
+    output to avoid giving users the impression that raw scores are
+    comparable across codebases of different sizes.
     """
     nodes = store.get_all_nodes()
     all_edges = store.get_all_edges()
 
-    # Build in-memory degree maps
-    in_deg: dict[str, int] = {}
-    out_deg: dict[str, int] = {}
+    # Per-edge-type incoming weights. Reverse edges skipped so a node's
+    # incoming call count isn't also counted as its outgoing called_by count.
+    FORWARD_WEIGHT = {
+        "calls": 2.0,
+        "inherits": 1.5,
+        "imports": 0.5,
+        "instantiates": 1.0,
+    }
+
+    # Build per-type in-degree and a general out-degree for calls only.
+    in_weighted: dict[str, float] = {}
+    out_calls: dict[str, int] = {}
     for e in all_edges:
-        out_deg[e["source_id"]] = out_deg.get(e["source_id"], 0) + 1
-        in_deg[e["target_id"]] = in_deg.get(e["target_id"], 0) + 1
+        etype = e["edge_type"]
+        w = FORWARD_WEIGHT.get(etype)
+        if w is None:
+            continue  # skip called_by/imported_by/inherited_by — reverse edges
+        in_weighted[e["target_id"]] = in_weighted.get(e["target_id"], 0.0) + w
+        if etype == "calls":
+            out_calls[e["source_id"]] = out_calls.get(e["source_id"], 0) + 1
 
     # Build node -> module map
     node_module: dict[str, str] = {}
@@ -218,30 +300,42 @@ def compute_importance(store: GraphStore):
         fp = n["file_path"]
         node_module[n["id"]] = fp.split("/")[0] if "/" in fp else ""
 
-    # Count cross-module edges per node (in-memory)
+    # Count cross-module forward edges per node (forward only — same reason).
     cross_module: dict[str, int] = {}
     for e in all_edges:
+        if e["edge_type"] not in FORWARD_WEIGHT:
+            continue
         src_mod = node_module.get(e["source_id"], "")
         tgt_mod = node_module.get(e["target_id"], "")
         if src_mod and tgt_mod and src_mod != tgt_mod:
             cross_module[e["source_id"]] = cross_module.get(e["source_id"], 0) + 1
             cross_module[e["target_id"]] = cross_module.get(e["target_id"], 0) + 1
 
-    # Compute and batch-update
-    updates = []
+    # Raw importance per node.
+    raw: list[tuple[str, float]] = []
     for node in nodes:
         nid = node["id"]
         is_exported = 1.0 if not node["name"].startswith("_") else 0.0
-        importance = (
-            in_deg.get(nid, 0) * 2.0
-            + cross_module.get(nid, 0) * 3.0
-            + is_exported * 1.0
-            + out_deg.get(nid, 0) * 0.5
+        score = (
+            in_weighted.get(nid, 0.0)
+            + cross_module.get(nid, 0) * 2.0
+            + is_exported
+            + out_calls.get(nid, 0) * 0.5
         )
-        updates.append((importance, nid))
+        raw.append((nid, score))
 
+    # Percentile rank: 0-100 based on ordinal position. Ties share the lower rank.
+    sorted_scores = sorted(raw, key=lambda x: x[1])
+    n_total = len(sorted_scores)
+    rank_map: dict[str, int] = {}
+    if n_total > 0:
+        for i, (nid, _) in enumerate(sorted_scores):
+            # i=0 → lowest rank 0, i=n-1 → rank 100
+            rank_map[nid] = int(round((i / max(1, n_total - 1)) * 100))
+
+    updates = [(score, rank_map.get(nid, 0), nid) for nid, score in raw]
     store.conn.executemany(
-        "UPDATE nodes SET importance = ? WHERE id = ?",
+        "UPDATE nodes SET importance = ?, importance_rank = ? WHERE id = ?",
         updates,
     )
     store.conn.commit()
@@ -292,11 +386,16 @@ def full_build(repo_root: str, db_path: str):
     with store.batch():
         for pr in parse_results:
             for node in pr.nodes:
+                tags = list(node.tags)
+                category = _derive_category(node.file_path)
+                cat_tag = f"category:{category}"
+                if cat_tag not in tags:
+                    tags.append(cat_tag)
                 store.upsert_node(
                     id=node.id, kind=node.kind, name=node.name,
                     file_path=node.file_path, line_start=node.line_start,
                     line_end=node.line_end, signature=node.signature,
-                    docstring=node.docstring, tags=node.tags,
+                    docstring=node.docstring, tags=tags,
                     parent_id=node.parent_id,
                 )
                 kws = extract_keywords(node)
@@ -428,11 +527,15 @@ def incremental_update(repo_root: str, db_path: str):
         for pr in parse_results:
             if pr.file_path in changed_set:
                 for node in pr.nodes:
+                    tags = list(node.tags)
+                    cat_tag = f"category:{_derive_category(node.file_path)}"
+                    if cat_tag not in tags:
+                        tags.append(cat_tag)
                     store.upsert_node(
                         id=node.id, kind=node.kind, name=node.name,
                         file_path=node.file_path, line_start=node.line_start,
                         line_end=node.line_end, signature=node.signature,
-                        docstring=node.docstring, tags=node.tags,
+                        docstring=node.docstring, tags=tags,
                         parent_id=node.parent_id,
                     )
                     kws = extract_keywords(node)

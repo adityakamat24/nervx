@@ -30,6 +30,8 @@ def fuzzy_find_scored(
     store: GraphStore, query: str, limit: int = 5
 ) -> list[tuple[str, float]]:
     """Like ``fuzzy_find_symbol`` but returns ``(node_id, score)`` pairs."""
+    # B11: normalize Windows-style backslashes so pasted paths resolve.
+    query = query.replace("\\", "/")
     query_lower = query.lower()
 
     # Extract the "name" part: "file.py::ClassName.method" -> "ClassName.method"
@@ -52,14 +54,27 @@ def fuzzy_find_scored(
     if "::" in query_context:
         query_context = query_context.split("::", 1)[0]
 
+    # "ClassName.method" queries carry a qualifier we can match explicitly;
+    # plain "method" queries have no qualifier and should fall back to the
+    # short-name branch.
+    query_has_qualifier = "." in query_name
+
     for node_id, node_name in rows:
         node_id_lower = node_id.lower()
         node_name_lower = node_name.lower()
         score = 0.0
 
-        # Exact name match beats everything else — this is the "I know the
-        # name, just not the file path" case.
-        if node_name_lower == query_short_l:
+        # Qualified-name exact match — "ClassName.method" → "...::ClassName.method".
+        # Beats plain short-name matches so users can use Class.method shorthand
+        # without the file path, even when the method name is common across
+        # classes.
+        if query_has_qualifier and (
+            node_id_lower.endswith("::" + query_name_l)
+            or node_id_lower == query_name_l
+        ):
+            score = 0.99
+        # Exact name match — "I know the name, just not the file path" case.
+        elif node_name_lower == query_short_l:
             score = 0.98
         # Full-id suffix match (e.g. query "ClassName.method")
         elif node_id_lower.endswith("::" + query_name_l) or node_id_lower == query_name_l:
@@ -93,7 +108,7 @@ def fuzzy_find_scored(
 
 
 def resolve_symbol(
-    store: GraphStore, query: str
+    store: GraphStore, query: str, pick: int | None = None,
 ) -> tuple[dict | None, str]:
     """Resolve a symbol query to a node.
 
@@ -102,16 +117,37 @@ def resolve_symbol(
     - One strong suggestion: (node, "")  — auto-resolved
     - Clear winner:          (node, "")  — top score strictly beats the rest
     - Ambiguous or missing:  (None, "Symbol not found: ... Did you mean: ...")
+
+    ``pick`` (1-indexed, B10) — after fuzzy scoring, bypass the ambiguity
+    gate and return the Nth candidate. Stateless shortcut for rerunning a
+    failed query with a specific choice from the did-you-mean list.
     """
-    # Exact match first
-    node = store.get_node(query)
-    if node:
-        return node, ""
+    # B11: normalize pasted Windows paths up front. Applies to exact lookup
+    # too so `store.get_node("nervx\\cli\\main.py")` hits the stored id.
+    query = query.replace("\\", "/")
+
+    # If the user explicitly asked for the Nth pick, skip the exact-match
+    # shortcut and go straight to scoring so the order is deterministic.
+    if pick is None:
+        node = store.get_node(query)
+        if node:
+            return node, ""
 
     scored = fuzzy_find_scored(store, query)
 
     if not scored:
         return None, f"Symbol not found: {query}"
+
+    if pick is not None:
+        idx = pick - 1
+        if idx < 0 or idx >= len(scored):
+            return None, (
+                f"--pick {pick} out of range (have {len(scored)} candidates for '{query}')"
+            )
+        node = store.get_node(scored[idx][0])
+        if node:
+            return node, ""
+        return None, f"Symbol not found: {scored[idx][0]}"
 
     # One match, or a clear winner (top score strictly greater than the next).
     top_id, top_score = scored[0]
@@ -121,13 +157,15 @@ def resolve_symbol(
             return node, ""
 
     lines = [f"Symbol not found: {query}", "", "Did you mean:"]
-    for s, _ in scored:
+    for i, (s, _) in enumerate(scored, 1):
         n = store.get_node(s)
         if n:
             lines.append(
-                f"  {s}  [{n['kind']}] {n['file_path']}:{n['line_start']}"
+                f"  [{i}] {s}  [{n['kind']}] {n['file_path']}:{n['line_start']}"
             )
         else:
-            lines.append(f"  {s}")
+            lines.append(f"  [{i}] {s}")
+    lines.append("")
+    lines.append("Rerun with --pick N to select one of the candidates above.")
 
     return None, "\n".join(lines)

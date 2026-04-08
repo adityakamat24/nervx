@@ -69,12 +69,14 @@ nervx replaces dozens of blind grep/read cycles with pre-indexed lookups. Fewer 
 
 nervx parses your codebase with tree-sitter, builds a graph of every function, class, and method, then pre-computes:
 
-- **Edges**: who calls what, who imports what, who inherits from what
-- **Importance scores**: based on caller count, cross-module usage, and connectivity
+- **Edges**: who calls what, who imports what, who inherits from what, and — new in 0.2.2 — which base-class methods dispatch to which concrete overrides (`dispatches_to`), so `trace` can follow polymorphic calls that static resolution misses
+- **Importance scores**: weighted per edge type (`calls`×2, `inherits`×1.5, `imports`×0.5) with a 0–100 percentile rank
+- **Path categories**: every node tagged `category:{vendor,generated,test,example,doc,core}` so `find`/`nav`/`blast-radius` can drop noise with `--exclude-category`
 - **Architectural patterns**: factories, singletons, event buses, strategy patterns, repositories
 - **Concept paths**: end-to-end call chains and domain clusters
-- **Git intelligence**: hotspots, temporal coupling, churn analysis
+- **Git intelligence**: hotspots, temporal coupling, churn analysis — `cochange --why` exposes the actual commit hashes behind each coupling
 - **Contract analysis**: callers that disagree on error handling
+- **Warning provenance**: every warning carries its methodology, confidence, and evidence (visible via `nav --verbose-warnings` or `--json`)
 - **Dead code**: unreferenced functions and classes
 
 All stored in a single SQLite database (`.nervx/brain.db`), queryable in milliseconds.
@@ -120,12 +122,20 @@ All stored in a single SQLite database (`.nervx/brain.db`), queryable in millise
 |---------|-------------|
 | `nervx callers <symbol>` | Who calls this function |
 | `nervx blast-radius <symbol>` | Full downstream impact (before refactors) |
-| `nervx trace <from> <to>` | Shortest call path between two symbols |
+| `nervx trace <from> <to>` | Shortest call path (falls back to inheritance + dynamic dispatch) |
 | `nervx find --dead` | Unreferenced code (framework-aware) |
 | `nervx find --no-tests --importance-gt 20` | Critical untested code |
+| `nervx find --exclude-category vendor,test` | Drop noise paths (vendor/test/generated/example/doc) |
 | `nervx flows [keyword]` | End-to-end execution paths |
 | `nervx diff --days 7` | Recent structural changes |
+| `nervx cochange <file> --why` | Co-modified files with the commit hashes behind each coupling |
 | `nervx string-refs <identifier>` | Every file:line where a string literal appears (all languages) |
+
+### Diagnostics
+| Command | What it does |
+|---------|-------------|
+| `nervx doctor` | Self-check: brain age, staleness, schema sanity, `.gitignore` coverage |
+| `nervx nav "<q>" --verbose-warnings` | Show warning provenance (methodology, confidence, evidence) |
 
 ### Testing
 | Command | What it does |
