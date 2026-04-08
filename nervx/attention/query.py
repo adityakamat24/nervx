@@ -6,9 +6,44 @@ import json
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from nervx.memory.store import GraphStore
 from nervx.reflexes.warnings import Warning, collect_warnings, compute_blast_radius
+
+
+# ── Synonym expansion ─────────────────────────────────────────────
+
+_SYNONYMS_CACHE: dict[str, list[str]] | None = None
+
+
+def _load_synonyms() -> dict[str, list[str]]:
+    """Load static synonym map once and cache it."""
+    global _SYNONYMS_CACHE
+    if _SYNONYMS_CACHE is not None:
+        return _SYNONYMS_CACHE
+    path = Path(__file__).parent / "synonyms.json"
+    try:
+        _SYNONYMS_CACHE = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        _SYNONYMS_CACHE = {}
+    return _SYNONYMS_CACHE
+
+
+def _expand_synonyms(terms: list[str]) -> list[str]:
+    """Return terms plus all synonyms, preserving order and deduping."""
+    syns = _load_synonyms()
+    expanded: list[str] = []
+    seen: set[str] = set()
+    for t in terms:
+        if t not in seen:
+            expanded.append(t)
+            seen.add(t)
+        for s in syns.get(t, []):
+            if s not in seen:
+                expanded.append(s)
+                seen.add(s)
+    return expanded
 
 
 # ── Query stop words ──────────────────────────────────────────────
@@ -99,6 +134,13 @@ def navigate(
     stems = list(dict.fromkeys(_stem(t) for t in terms))
     prefix_results = store.search_keywords_prefix(stems)
 
+    # Synonym expansion — only lookups for terms the user didn't already type.
+    expanded = _expand_synonyms(terms)
+    synonym_only = [t for t in expanded if t not in terms]
+    synonym_results = (
+        store.search_keywords_weighted(synonym_only) if synonym_only else []
+    )
+
     # Merge: exact matches keep full score, prefix-only matches get reduced weight
     seed_map: dict[str, float] = {}
     for nid, score in exact_results:
@@ -109,6 +151,13 @@ def navigate(
             seed_map[nid] = max(seed_map[nid], score)
         else:
             seed_map[nid] = score * 0.6  # prefix-only gets 60% weight
+    # Synonym hits get half weight — they're suggestive, not authoritative.
+    for nid, score in synonym_results:
+        boosted = score * 0.5
+        if nid in seed_map:
+            seed_map[nid] = max(seed_map[nid], boosted)
+        else:
+            seed_map[nid] = boosted
 
     seed_results = sorted(seed_map.items(), key=lambda x: -x[1])
 

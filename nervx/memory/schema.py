@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS nodes (
     docstring TEXT,
     tags TEXT DEFAULT '[]',
     importance REAL DEFAULT 0.0,
-    parent_id TEXT DEFAULT ''
+    parent_id TEXT DEFAULT '',
+    content_hash TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS edges (
@@ -88,6 +89,16 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS string_refs (
+    literal TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    line_number INTEGER NOT NULL,
+    context TEXT DEFAULT '',
+    PRIMARY KEY (literal, file_path, line_number)
+);
+CREATE INDEX IF NOT EXISTS idx_string_refs_literal ON string_refs(literal);
+CREATE INDEX IF NOT EXISTS idx_string_refs_file ON string_refs(file_path);
 
 CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file_path);
 CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);

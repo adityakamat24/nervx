@@ -7,6 +7,7 @@ without loading entire files.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from nervx.attention.fuzzy import resolve_symbol
@@ -18,11 +19,22 @@ def read_symbol(
     symbol_id: str,
     context_depth: int = 0,
     repo_root: str = ".",
+    since_hash: str = "",
 ) -> str:
-    """Read the source code of a symbol and optionally its callees."""
+    """Read the source code of a symbol and optionally its callees.
+
+    If ``since_hash`` is provided and matches the stored content hash for
+    the primary symbol, return the single token ``"unchanged"``.
+    """
     node, error = resolve_symbol(store, symbol_id)
     if node is None:
         return error
+
+    # --since shortcut — 1-token response when nothing has changed.
+    if since_hash:
+        stored = (node.get("content_hash") or "").strip()
+        if stored and stored == since_hash.strip():
+            return "unchanged"
 
     collected: list[tuple[int, dict]] = []
     _collect_symbols(
@@ -36,9 +48,12 @@ def read_symbol(
         if source is None:
             continue
 
+        # Hash used for --since on subsequent reads.
+        digest = hashlib.md5(source.encode("utf-8", errors="replace")).hexdigest()[:8]
         header = (
             f"## {sym_node['id']}  "
-            f"(lines {sym_node['line_start']}-{sym_node['line_end']})"
+            f"(lines {sym_node['line_start']}-{sym_node['line_end']}) "
+            f"[hash={digest}]"
         )
         if depth > last_depth:
             header = f"\n--- called at depth {depth} ---\n\n{header}"

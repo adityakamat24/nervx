@@ -149,48 +149,90 @@ _CLAUDE_MD_END = "<!-- nervx:end -->"
 def generate_claude_instructions() -> str:
     """Generate the nervx section for CLAUDE.md."""
     return f"""{_CLAUDE_MD_START}
-## nervx — Codebase Intelligence
+## nervx — codebase brain (auto-generated, do not edit this section)
 
-This project has a nervx brain (`.nervx/brain.db`). **Use nervx commands before falling back to Grep/Glob/Read** — they return pre-indexed results in ~400 tokens instead of multi-step exploration costing thousands.
+nervx has pre-indexed this codebase into `.nervx/brain.db`. Use these commands
+**before** falling back to grep/cat/Read — they return pre-computed answers in
+tens to hundreds of tokens instead of thousands.
 
-### Commands (run via Bash tool)
+### EXPLORATION (use these BEFORE reading files)
 
-| Command | When to use | Example |
-|---------|-------------|---------|
-| `nervx nav "<question>"` | Before exploring code for any task | `nervx nav "how does auth work"` |
-| `nervx read "<symbol_id>" --context 1` | Instead of `cat`/Read for a specific function | `nervx read "auth/validator.py::validate_token" --context 1` |
-| `nervx callers "<symbol_id>"` | "What calls this function?" (focused) | `nervx callers "auth/validator.py::validate_token"` |
-| `nervx blast-radius "<symbol_id>"` | Before refactoring a function/class | `nervx blast-radius "src/api.py::handle_request"` |
-| `nervx find --dead` | Finding unreferenced dead code | `nervx find --dead --kind function` |
-| `nervx find --no-tests --importance-gt 20` | Finding untested critical code | `nervx find --kind function --no-tests` |
-| `nervx flows <keyword>` | Tracing execution paths | `nervx flows auth` |
-| `nervx diff --days 7` | Seeing recent structural changes | `nervx diff --days 30` |
+| Command | What you get |
+|---------|--------------|
+| `nervx nav "<question>"` | ranked file:line results, call flows, read order, warnings |
+| `nervx tree <file>` | structural overview of a file, ~150 tokens vs 4000 |
+| `nervx peek <symbol>` | 50-token preview — signature, callees, caller count, test coverage, no source |
 
-### Prefer `nervx read` and `nervx callers` over raw file reads
+### READING (use these INSTEAD of cat/Read)
 
-- `nervx read "<symbol>" --context 1` returns the source of a single function **plus the source of everything it calls**. This replaces `cat file.py | head -200` or Read-ing an entire file when you only need one function and its immediate callees.
-- `nervx callers "<symbol>"` returns the direct callers of a function. This replaces grepping for a function name when you just want to know "what calls this?"
-- Both commands support fuzzy matching: if you type `validate_token` instead of `auth/validator.py::validate_token`, nervx will auto-resolve or suggest candidates.
+| Command | What you get |
+|---------|--------------|
+| `nervx read <symbol>` | source of one function/method |
+| `nervx read <symbol> --context 1` | source of the symbol + everything it calls |
+| `nervx read <symbol> --since <hash>` | returns "unchanged" (1 token) if the symbol hasn't been edited |
 
-### What navigate returns
+### QUICK ANSWERS (5–30 tokens each — use instead of reading source to verify)
 
-`nervx nav` returns ranked symbols, **execution flows** (call chains traced from matches), connected symbols, suggested read order, and warnings — all in one query.
+| Command | Answers |
+|---------|---------|
+| `nervx ask exists <symbol>` | yes / no |
+| `nervx ask signature <symbol>` | the function signature |
+| `nervx ask calls <A> <B>` | does A call B directly? |
+| `nervx ask imports <file>` | what this file imports |
+| `nervx ask is-async <symbol>` | yes / no |
+| `nervx ask returns-type <symbol>` | return type from signature |
+| `nervx ask callers-count <symbol>` | integer |
+| `nervx ask has-tests <symbol>` | yes / no + count |
+| `nervx verify "A calls B"` | confirms or denies a call path (up to 6 hops) |
 
-### Workflow
+### ANALYSIS
 
-1. **Start of session**: Read `NERVX.md` for project overview (module map, entry points, patterns, fragile zones)
-2. **Before any code exploration**: Run `nervx nav "<your question>"` first — it returns the right files, line ranges, execution flows, read order, and warnings
-3. **To read a specific function**: Run `nervx read "<symbol>" --context 1` instead of Read/cat on the whole file
-4. **To find callers**: Run `nervx callers "<symbol>"` instead of grepping
-5. **Before refactoring**: Run `nervx blast-radius "<symbol>"` to see all downstream callers
-6. **Before cleanup**: Run `nervx find --dead` to find unreferenced symbols that may be safe to remove
-7. **Only then** fall back to Grep/Read for details nervx didn't cover
+| Command | When to use |
+|---------|-------------|
+| `nervx callers <symbol>` | who calls this function (focused) |
+| `nervx blast-radius <symbol>` | full downstream impact (before refactors) |
+| `nervx trace <from> <to>` | shortest call path between two symbols; add `--read` for source |
+| `nervx find --dead` | unreferenced code (framework-aware) |
+| `nervx find --no-tests --importance-gt 20` | critical untested code |
+| `nervx flows [keyword]` | end-to-end execution paths |
+| `nervx diff --days 7` | recent structural changes |
+
+### TESTING
+
+| Command | What you get |
+|---------|--------------|
+| `nervx run pytest [args]` | structured summary (~80 tokens vs 8000 of traceback) |
+| `nervx run pytest --raw <run_id>` | retrieve the full cached raw output |
+
+### CROSS-LANGUAGE
+
+| Command | What you get |
+|---------|--------------|
+| `nervx string-refs <identifier>` | every file:line where this string literal appears, across all languages |
+
+### WORKFLOW
+
+1. Start with `nervx tree` / `nervx peek` to explore — NOT cat/Read.
+2. Use `nervx ask` / `nervx verify` for quick verification — NOT reading source.
+3. Use `nervx read --context 1` for targeted reading — NOT full file reads.
+4. Use `nervx run pytest` for test results — NOT raw pytest output.
+5. If nervx commands fail or return nothing useful, then fall back to grep/cat.
 
 ### Symbol ID format
-Symbol IDs use the format `file_path::ClassName.method_name` or `file_path::function_name`. Example: `server/main.py::handle_request`. Fuzzy matching means you can often just use the short name (`handle_request`) and nervx will resolve it.
+`file_path::ClassName.method_name` or `file_path::function_name`. Example:
+`server/main.py::handle_request`. Fuzzy matching is built in — short names like
+`handle_request` usually resolve automatically, and ambiguous queries return a
+"did you mean?" list.
 
-### Excluding files from the graph
-Create a `.nervxignore` in the repo root (gitignore syntax) to exclude files from parsing. Defaults already skip `__pycache__/`, `node_modules/`, `dist/`, `build/`, `.venv/`, minified bundles, etc.
+### All commands support `--json`
+Every output command accepts `--json` for machine-parseable output.
+
+### Excluding files
+Create a `.nervxignore` in the repo root (gitignore syntax) to exclude files.
+Defaults already skip `__pycache__/`, `node_modules/`, `dist/`, `build/`,
+`.venv/`, minified bundles, lockfiles, vendor dirs, etc.
+
+NERVX.md contains the full architectural overview of this project.
 {_CLAUDE_MD_END}"""
 
 

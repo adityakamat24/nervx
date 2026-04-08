@@ -23,6 +23,13 @@ def fuzzy_find_symbol(store: GraphStore, query: str, limit: int = 5) -> list[str
     5. Substring of full id.
     6. Fuzzy similarity on the short name.
     """
+    return [nid for nid, _ in fuzzy_find_scored(store, query, limit)]
+
+
+def fuzzy_find_scored(
+    store: GraphStore, query: str, limit: int = 5
+) -> list[tuple[str, float]]:
+    """Like ``fuzzy_find_symbol`` but returns ``(node_id, score)`` pairs."""
     query_lower = query.lower()
 
     # Extract the "name" part: "file.py::ClassName.method" -> "ClassName.method"
@@ -36,33 +43,53 @@ def fuzzy_find_symbol(store: GraphStore, query: str, limit: int = 5) -> list[str
 
     candidates: list[tuple[float, str]] = []
 
+    query_short_l = query_short.lower()
+    query_name_l = query_name.lower()
+
+    # If the query carries extra context (file path or qualifier before ::),
+    # track it so we can break ties between identically-named symbols.
+    query_context = query_lower
+    if "::" in query_context:
+        query_context = query_context.split("::", 1)[0]
+
     for node_id, node_name in rows:
         node_id_lower = node_id.lower()
         node_name_lower = node_name.lower()
         score = 0.0
 
-        if node_id_lower.endswith(query_lower):
+        # Exact name match beats everything else — this is the "I know the
+        # name, just not the file path" case.
+        if node_name_lower == query_short_l:
+            score = 0.98
+        # Full-id suffix match (e.g. query "ClassName.method")
+        elif node_id_lower.endswith("::" + query_name_l) or node_id_lower == query_name_l:
             score = 0.95
-        elif node_name_lower == query_short.lower():
-            score = 0.90
-        elif node_id_lower.endswith(query_name.lower()):
-            score = 0.88
-        elif query_short.lower() in node_name_lower:
+        # Query is the full id suffix (after the ::)
+        elif "::" in node_id_lower and node_id_lower.split("::", 1)[1] == query_lower:
+            score = 0.94
+        elif node_id_lower.endswith(query_lower):
+            score = 0.80
+        elif query_short_l in node_name_lower:
             score = 0.70
         elif query_lower in node_id_lower:
             score = 0.60
         else:
-            ratio = SequenceMatcher(
-                None, query_short.lower(), node_name_lower
-            ).ratio()
+            ratio = SequenceMatcher(None, query_short_l, node_name_lower).ratio()
             if ratio > 0.5:
                 score = ratio * 0.5  # scale fuzzy matches down
+
+        # Tiny context tie-breaker: if the query mentions part of the
+        # file path or qualifier, prefer nodes that include it. Keeps the
+        # total score under 1.0 so exact matches still dominate.
+        if score >= 0.5 and query_context and query_context != query_short_l:
+            if query_context in node_id_lower:
+                score += 0.01
 
         if score > 0.3:
             candidates.append((score, node_id))
 
     candidates.sort(key=lambda x: -x[0])
-    return [node_id for _, node_id in candidates[:limit]]
+    return [(nid, sc) for sc, nid in candidates[:limit]]
 
 
 def resolve_symbol(
@@ -73,6 +100,7 @@ def resolve_symbol(
     Returns (node_dict, error_message).
     - Found:                 (node, "")
     - One strong suggestion: (node, "")  — auto-resolved
+    - Clear winner:          (node, "")  — top score strictly beats the rest
     - Ambiguous or missing:  (None, "Symbol not found: ... Did you mean: ...")
     """
     # Exact match first
@@ -80,19 +108,20 @@ def resolve_symbol(
     if node:
         return node, ""
 
-    suggestions = fuzzy_find_symbol(store, query)
+    scored = fuzzy_find_scored(store, query)
 
-    if not suggestions:
+    if not scored:
         return None, f"Symbol not found: {query}"
 
-    if len(suggestions) == 1:
-        # Single strong match — auto-resolve
-        node = store.get_node(suggestions[0])
+    # One match, or a clear winner (top score strictly greater than the next).
+    top_id, top_score = scored[0]
+    if len(scored) == 1 or top_score > scored[1][1]:
+        node = store.get_node(top_id)
         if node:
             return node, ""
 
     lines = [f"Symbol not found: {query}", "", "Did you mean:"]
-    for s in suggestions:
+    for s, _ in scored:
         n = store.get_node(s)
         if n:
             lines.append(

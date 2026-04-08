@@ -17,7 +17,16 @@ class GraphStore:
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA_SQL)
+        self._migrate()
         self._in_batch = False
+
+    def _migrate(self):
+        """Lightweight schema migrations for older brain.db files."""
+        # Add content_hash column if missing (v0.2).
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(nodes)").fetchall()}
+        if "content_hash" not in cols:
+            self.conn.execute("ALTER TABLE nodes ADD COLUMN content_hash TEXT DEFAULT ''")
+            self.conn.commit()
 
     def __enter__(self):
         return self
@@ -52,16 +61,17 @@ class GraphStore:
         tags: list[str] | None = None,
         importance: float = 0.0,
         parent_id: str = "",
+        content_hash: str = "",
     ):
         self.conn.execute(
             """INSERT OR REPLACE INTO nodes
                (id, kind, name, file_path, line_start, line_end,
-                signature, docstring, tags, importance, parent_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                signature, docstring, tags, importance, parent_id, content_hash)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 id, kind, name, file_path, line_start, line_end,
                 signature, docstring, json.dumps(tags or []),
-                importance, parent_id,
+                importance, parent_id, content_hash,
             ),
         )
         self._commit()
@@ -471,6 +481,49 @@ class GraphStore:
         ).fetchall()
         return [row["function_id"] for row in rows]
 
+    # ── String-ref operations ────────────────────────────────────
+
+    def add_string_ref(
+        self,
+        literal: str,
+        file_path: str,
+        line_number: int,
+        context: str = "",
+    ):
+        self.conn.execute(
+            """INSERT OR REPLACE INTO string_refs
+               (literal, file_path, line_number, context)
+               VALUES (?, ?, ?, ?)""",
+            (literal, file_path, line_number, context),
+        )
+        self._commit()
+
+    def add_string_refs_bulk(
+        self, rows: list[tuple[str, str, int, str]]
+    ):
+        self.conn.executemany(
+            """INSERT OR REPLACE INTO string_refs
+               (literal, file_path, line_number, context)
+               VALUES (?, ?, ?, ?)""",
+            rows,
+        )
+        self._commit()
+
+    def get_string_refs(self, literal: str) -> list[dict]:
+        rows = self.conn.execute(
+            """SELECT * FROM string_refs
+               WHERE literal = ?
+               ORDER BY file_path, line_number""",
+            (literal,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_string_refs_for_file(self, file_path: str):
+        self.conn.execute(
+            "DELETE FROM string_refs WHERE file_path = ?", (file_path,)
+        )
+        self._commit()
+
     # ── Meta operations ──────────────────────────────────────────
 
     def set_meta(self, key: str, value: str):
@@ -492,7 +545,7 @@ class GraphStore:
         for table in [
             "nodes", "edges", "cochanges", "keywords",
             "file_stats", "file_hashes", "concept_paths",
-            "patterns", "contracts", "meta",
+            "patterns", "contracts", "meta", "string_refs",
         ]:
             self.conn.execute(f"DELETE FROM {table}")
         self._commit()
@@ -527,6 +580,9 @@ class GraphStore:
         )
         self.conn.execute(
             "DELETE FROM file_hashes WHERE file_path = ?", (file_path,)
+        )
+        self.conn.execute(
+            "DELETE FROM string_refs WHERE file_path = ?", (file_path,)
         )
         self._commit()
 
