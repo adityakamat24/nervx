@@ -66,10 +66,11 @@ def is_git_repo(path: str) -> bool:
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--git-dir"],
-            cwd=path, capture_output=True, text=True, timeout=5,
+            cwd=path, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=5,
         )
         return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.TimeoutExpired, UnicodeError):
         return False
 
 
@@ -118,7 +119,15 @@ class GitMiner:
             )
 
     def _parse_git_log(self) -> list[Commit]:
-        """Run git log and parse the output into Commit objects."""
+        """Run git log and parse the output into Commit objects.
+
+        Git log output routinely contains non-ASCII bytes (author names,
+        commit messages, file paths). On Windows, subprocess defaults to
+        cp1252 which crashes on anything outside latin-1. We force utf-8
+        with ``errors='replace'`` so mining can't silently die on a single
+        weird byte — the worst case is a replacement character in an
+        author name, which is strictly better than no git data at all.
+        """
         try:
             result = subprocess.run(
                 [
@@ -130,12 +139,16 @@ class GitMiner:
                     "--name-only",
                 ],
                 cwd=self.repo_root,
-                capture_output=True, text=True, timeout=30,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
             )
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except (FileNotFoundError, subprocess.TimeoutExpired, UnicodeError):
             return []
 
-        if result.returncode != 0:
+        if result.returncode != 0 or not result.stdout:
             return []
 
         commits: list[Commit] = []

@@ -41,9 +41,13 @@ def run_pytest(args: list[str], nervx_dir: str) -> str:
         "--json-report",
         f"--json-report-file={json_report}",
     ]
+    # Force utf-8 decoding so non-ASCII bytes in pytest output (unicode
+    # assertion messages, non-latin file paths) don't crash the reader
+    # thread under Windows cp1252.
     try:
         result = subprocess.run(
-            json_cmd, capture_output=True, text=True, timeout=600,
+            json_cmd, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=600,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
         return f"pytest failed to start: {e}"
@@ -56,7 +60,8 @@ def run_pytest(args: list[str], nervx_dir: str) -> str:
         # Plugin missing — retry in plain text mode.
         try:
             result = subprocess.run(
-                base_cmd, capture_output=True, text=True, timeout=600,
+                base_cmd, capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=600,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError) as e:
             return f"pytest failed to start: {e}"
