@@ -497,19 +497,24 @@ def _is_dead(
     classes_with_bases: set[str],
 ) -> bool:
     """Check if a node qualifies as dead code (conservative)."""
+    from nervx.instinct.frameworks import is_framework_entrypoint
+
     # Skip file nodes
     if node["kind"] == "file":
         return False
 
-    # Skip nodes invoked by frameworks/runtime/language features
+    # Framework-aware filter — covers dunder, route handlers, fixtures,
+    # subclass overrides, lifecycle methods, etc.
+    node_for_framework = dict(node)
+    node_for_framework["tags"] = tags
+    if is_framework_entrypoint(node_for_framework):
+        return False
+
+    # Belt-and-braces: legacy _ALIVE_TAGS check in case new tags slip in.
     if _ALIVE_TAGS & set(tags):
         return False
 
     name = node["name"]
-
-    # Skip dunder methods (invoked implicitly by Python)
-    if name.startswith("__") and name.endswith("__"):
-        return False
 
     # Skip main functions
     if name == "main":

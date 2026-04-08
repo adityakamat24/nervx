@@ -158,11 +158,19 @@ This project has a nervx brain (`.nervx/brain.db`). **Use nervx commands before 
 | Command | When to use | Example |
 |---------|-------------|---------|
 | `nervx nav "<question>"` | Before exploring code for any task | `nervx nav "how does auth work"` |
+| `nervx read "<symbol_id>" --context 1` | Instead of `cat`/Read for a specific function | `nervx read "auth/validator.py::validate_token" --context 1` |
+| `nervx callers "<symbol_id>"` | "What calls this function?" (focused) | `nervx callers "auth/validator.py::validate_token"` |
 | `nervx blast-radius "<symbol_id>"` | Before refactoring a function/class | `nervx blast-radius "src/api.py::handle_request"` |
 | `nervx find --dead` | Finding unreferenced dead code | `nervx find --dead --kind function` |
 | `nervx find --no-tests --importance-gt 20` | Finding untested critical code | `nervx find --kind function --no-tests` |
 | `nervx flows <keyword>` | Tracing execution paths | `nervx flows auth` |
 | `nervx diff --days 7` | Seeing recent structural changes | `nervx diff --days 30` |
+
+### Prefer `nervx read` and `nervx callers` over raw file reads
+
+- `nervx read "<symbol>" --context 1` returns the source of a single function **plus the source of everything it calls**. This replaces `cat file.py | head -200` or Read-ing an entire file when you only need one function and its immediate callees.
+- `nervx callers "<symbol>"` returns the direct callers of a function. This replaces grepping for a function name when you just want to know "what calls this?"
+- Both commands support fuzzy matching: if you type `validate_token` instead of `auth/validator.py::validate_token`, nervx will auto-resolve or suggest candidates.
 
 ### What navigate returns
 
@@ -172,12 +180,17 @@ This project has a nervx brain (`.nervx/brain.db`). **Use nervx commands before 
 
 1. **Start of session**: Read `NERVX.md` for project overview (module map, entry points, patterns, fragile zones)
 2. **Before any code exploration**: Run `nervx nav "<your question>"` first — it returns the right files, line ranges, execution flows, read order, and warnings
-3. **Before refactoring**: Run `nervx blast-radius "<symbol>"` to see all downstream callers (saves multiple rounds of grep)
-4. **Before cleanup**: Run `nervx find --dead` to find unreferenced symbols that may be safe to remove
-5. **Only then** fall back to Grep/Read for details nervx didn't cover
+3. **To read a specific function**: Run `nervx read "<symbol>" --context 1` instead of Read/cat on the whole file
+4. **To find callers**: Run `nervx callers "<symbol>"` instead of grepping
+5. **Before refactoring**: Run `nervx blast-radius "<symbol>"` to see all downstream callers
+6. **Before cleanup**: Run `nervx find --dead` to find unreferenced symbols that may be safe to remove
+7. **Only then** fall back to Grep/Read for details nervx didn't cover
 
 ### Symbol ID format
-Symbol IDs use the format `file_path::ClassName.method_name` or `file_path::function_name`. Example: `server/main.py::handle_request`
+Symbol IDs use the format `file_path::ClassName.method_name` or `file_path::function_name`. Example: `server/main.py::handle_request`. Fuzzy matching means you can often just use the short name (`handle_request`) and nervx will resolve it.
+
+### Excluding files from the graph
+Create a `.nervxignore` in the repo root (gitignore syntax) to exclude files from parsing. Defaults already skip `__pycache__/`, `node_modules/`, `dist/`, `build/`, `.venv/`, minified bundles, etc.
 {_CLAUDE_MD_END}"""
 
 

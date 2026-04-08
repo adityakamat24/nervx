@@ -12,6 +12,7 @@ from pathlib import Path
 
 from nervx.memory.store import GraphStore
 from nervx.perception.git_miner import GitMiner, is_git_repo
+from nervx.perception.ignore import load_ignore_patterns, should_ignore
 from nervx.perception.linker import resolve_all
 from nervx.perception.parser import extract_keywords, parse_file
 
@@ -59,14 +60,35 @@ ALL_EXTENSIONS = (
 
 
 def walk_files(repo_root: str, extensions: tuple[str, ...] = ALL_EXTENSIONS) -> list[str]:
-    """Walk the repo and collect source files, applying exclusion rules."""
+    """Walk the repo and collect source files, applying exclusion rules.
+
+    Exclusion is driven by:
+      1. Hardcoded fast-path EXCLUDE_DIRS / EXCLUDE_FILES (prune walk for speed).
+      2. `.nervxignore` + built-in defaults via `should_ignore` (gitignore semantics).
+    """
+    ignore_patterns = load_ignore_patterns(repo_root)
+    # If there are any negation patterns, we cannot prune directories — gitignore
+    # negations need to see children of an excluded directory to re-include them.
+    has_negations = any(p.startswith("!") for p in ignore_patterns)
     files: list[str] = []
     for dirpath, dirnames, filenames in os.walk(repo_root):
-        # Prune excluded directories (in-place to prevent os.walk from descending)
+        # Fast-prune obvious noise directories from the walk.
         dirnames[:] = [
             d for d in dirnames
             if d not in EXCLUDE_DIRS and not d.endswith(".egg-info")
         ]
+
+        # Apply .nervxignore to directory pruning too — avoids descending into
+        # user-ignored trees like `generated/` or `vendor/`. Skipped if there
+        # are negation patterns, since negations may re-include children.
+        if not has_negations:
+            dirnames[:] = [
+                d for d in dirnames
+                if not should_ignore(
+                    _rel_path(os.path.join(dirpath, d), repo_root) + "/",
+                    ignore_patterns,
+                )
+            ]
 
         for f in filenames:
             if f in EXCLUDE_FILES:
@@ -74,6 +96,9 @@ def walk_files(repo_root: str, extensions: tuple[str, ...] = ALL_EXTENSIONS) -> 
             if not any(f.endswith(ext) for ext in extensions):
                 continue
             full_path = os.path.join(dirpath, f)
+            rel = _rel_path(full_path, repo_root)
+            if should_ignore(rel, ignore_patterns):
+                continue
             try:
                 if os.path.getsize(full_path) > MAX_FILE_SIZE:
                     continue

@@ -546,11 +546,25 @@ def _get_decorator_text(decorator_node) -> str:
     return full.strip()
 
 
+def _decorator_tag_name(dec: str) -> str:
+    """Strip arguments and whitespace from a decorator, e.g. `app.route("/x")` -> `app.route`."""
+    # Cut at first `(` or whitespace
+    name = dec.split("(", 1)[0]
+    name = name.split()[0] if name.split() else name
+    return name.strip()
+
+
 # ── Tag computation ────────────────────────────────────────────────
 
 def _compute_class_tags(class_name: str, base_classes: list[str], decorators: list[str]) -> list[str]:
     """Compute semantic tags for a class."""
     tags = []
+
+    # Raw decorator names for framework-awareness
+    for dec in decorators:
+        name = _decorator_tag_name(dec)
+        if name:
+            tags.append(f"decorator:{name}")
 
     # extends tag
     if base_classes:
@@ -594,6 +608,12 @@ def _compute_class_tags(class_name: str, base_classes: list[str], decorators: li
 def _compute_function_tags(func_name: str, is_async: bool, decorators: list[str]) -> list[str]:
     """Compute semantic tags for a function or method."""
     tags = []
+
+    # Raw decorator names for framework-awareness
+    for dec in decorators:
+        name = _decorator_tag_name(dec)
+        if name:
+            tags.append(f"decorator:{name}")
 
     # async
     if is_async:

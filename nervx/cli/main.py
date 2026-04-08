@@ -116,6 +116,31 @@ def cmd_blast_radius(args):
     store.close()
 
 
+def cmd_callers(args):
+    """Callers command — show what calls a symbol."""
+    from nervx.attention.callers import find_callers
+
+    repo_root = _resolve_repo(args)
+    db = _ensure_brain(repo_root)
+    store = GraphStore(db)
+    output = find_callers(store, args.symbol, max_depth=args.depth)
+    print(output)
+    store.close()
+
+
+def cmd_read(args):
+    """Read command — print source of a symbol (plus optional callees)."""
+    from nervx.attention.reader import read_symbol
+
+    repo_root = _resolve_repo(args)
+    db = _ensure_brain(repo_root)
+    store = GraphStore(db)
+    depth = min(max(0, args.context), 3)
+    output = read_symbol(store, args.symbol, context_depth=depth, repo_root=repo_root)
+    print(output)
+    store.close()
+
+
 def cmd_flows(args):
     """Flows command."""
     import json
@@ -314,6 +339,22 @@ def main():
     p_blast.add_argument("--depth", type=int, default=3, help="Max depth")
     p_blast.add_argument("--repo", default=None, help="Repository path")
     p_blast.set_defaults(func=cmd_blast_radius)
+
+    # callers
+    p_callers = subparsers.add_parser("callers", help="Show what calls a symbol")
+    p_callers.add_argument("symbol", help="Symbol ID")
+    p_callers.add_argument("--depth", type=int, default=1,
+                           help="Caller depth (default: 1)")
+    p_callers.add_argument("--repo", default=None, help="Repository path")
+    p_callers.set_defaults(func=cmd_callers)
+
+    # read
+    p_read = subparsers.add_parser("read", help="Read source code of a symbol")
+    p_read.add_argument("symbol", help="Symbol ID to read")
+    p_read.add_argument("--context", type=int, default=0,
+                        help="Include callees up to this depth (default: 0, max: 3)")
+    p_read.add_argument("--repo", default=None, help="Repository path")
+    p_read.set_defaults(func=cmd_read)
 
     # flows
     p_flows = subparsers.add_parser("flows", help="Show concept paths")
