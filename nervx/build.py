@@ -80,6 +80,10 @@ _CATEGORY_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
                    "_pb.py", "_pb2.py", ".pb.go")),
     ("test", ("/tests/", "/test/", "/__tests__/", "/spec/", "/specs/",
               "_test.", ".test.", ".spec.", "test_", "_spec.")),
+    # CI / build scripts — rarely load-bearing, flood importance scores.
+    # Deliberately does NOT match "/tools/" (nervx's own runners live under
+    # nervx/tools/) or "/utils/" (too generic).
+    ("script", ("/scripts/", "/ci/", "/build_scripts/", "/.github/")),
     ("example", ("/examples/", "/example/", "/samples/", "/sample/",
                  "/demos/", "/demo/")),
     ("doc", ("/docs/", "/doc/", "/documentation/")),

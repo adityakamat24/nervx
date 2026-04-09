@@ -71,7 +71,7 @@ nervx parses your codebase with tree-sitter, builds a graph of every function, c
 
 - **Edges**: who calls what, who imports what, who inherits from what, and — new in 0.2.2 — which base-class methods dispatch to which concrete overrides (`dispatches_to`), so `trace` can follow polymorphic calls that static resolution misses
 - **Importance scores**: weighted per edge type (`calls`×2, `inherits`×1.5, `imports`×0.5) with a 0–100 percentile rank
-- **Path categories**: every node tagged `category:{vendor,generated,test,example,doc,core}` so `find`/`nav`/`blast-radius` can drop noise with `--exclude-category`
+- **Path categories**: every node tagged `category:{vendor,generated,test,example,doc,script,core}` so `find`/`nav`/`blast-radius` can drop noise with `--exclude-category` — new in 0.2.4, `script` catches `scripts/`, `ci/`, `build_scripts/`, `.github/` paths that otherwise pollute importance rankings
 - **Architectural patterns**: factories, singletons, event buses, strategy patterns, repositories
 - **Concept paths**: end-to-end call chains and domain clusters
 - **Git intelligence**: hotspots, temporal coupling, churn analysis — `cochange --why` exposes the actual commit hashes behind each coupling

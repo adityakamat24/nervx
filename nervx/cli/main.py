@@ -315,7 +315,10 @@ def cmd_ask(args):
     repo_root = _resolve_repo(args)
     db = _ensure_brain(repo_root)
     store = GraphStore(db)
-    result = run_ask(store, args.subcommand, list(args.args or []))
+    result = run_ask(
+        store, args.subcommand, list(args.args or []),
+        pick=getattr(args, "pick", None),
+    )
     _emit(args, format_ask(result), result)
     store.close()
 
@@ -468,6 +471,22 @@ def cmd_find(args):
     repo_root = _resolve_repo(args)
     db = _ensure_brain(repo_root)
     store = GraphStore(db)
+
+    # Default category exclusion for --no-tests / --no-direct-tests:
+    # tautologically-untested code (fixtures, docs, examples, vendored, CI
+    # scripts) otherwise drowns out the real "critical untested code" signal.
+    # Skip the default if the user passed explicit category filters or the
+    # --include-test-fixtures opt-out.
+    exclude_category = getattr(args, "exclude_category", None)
+    include_category = getattr(args, "include_category", None)
+    if (
+        (args.no_tests or getattr(args, "no_direct_tests", False))
+        and not exclude_category
+        and not include_category
+        and not getattr(args, "include_test_fixtures", False)
+    ):
+        exclude_category = ["test", "doc", "example", "vendor", "generated", "script"]
+
     results = find(
         store,
         kind=args.kind,
@@ -477,8 +496,8 @@ def cmd_find(args):
         importance_gt=args.importance_gt,
         cross_module=args.cross_module,
         dead=getattr(args, "dead", False),
-        exclude_category=getattr(args, "exclude_category", None),
-        include_category=getattr(args, "include_category", None),
+        exclude_category=exclude_category,
+        include_category=include_category,
     )
     if getattr(args, "json", False):
         print(json.dumps([dict(n) for n in results], indent=2, default=str))
@@ -1002,6 +1021,10 @@ def main():
         ]),
     )
     p_ask.add_argument("args", nargs="*", help="Subcommand arguments")
+    p_ask.add_argument(
+        "--pick", type=int, default=None,
+        help="Select Nth fuzzy candidate (applies to first symbol arg only for `ask calls`)",
+    )
     p_ask.add_argument("--json", action="store_true", help="Emit JSON")
     p_ask.add_argument("--repo", default=None, help="Repository path")
     p_ask.set_defaults(func=cmd_ask)
@@ -1075,6 +1098,10 @@ def main():
     p_find.add_argument("--include-category", action="append", default=None,
                         dest="include_category",
                         help="Keep only nodes in this category. Repeatable.")
+    p_find.add_argument("--include-test-fixtures", action="store_true",
+                        dest="include_test_fixtures",
+                        help="Disable the default category auto-filter applied with --no-tests "
+                             "(which drops test/doc/example/vendor/generated/script categories)")
     p_find.add_argument("--json", action="store_true", help="Emit JSON")
     p_find.add_argument("--repo", default=None, help="Repository path")
     p_find.set_defaults(func=cmd_find)

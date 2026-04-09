@@ -206,18 +206,68 @@ def navigate(
         if len(scored_seeds) >= 20:
             break
 
-    # Step 3: Score and rank
-    # Keyword relevance should dominate; importance is a tiebreaker
+    # Step 3: Score and rank.
+    # Keyword relevance dominates, with an explicit term-coverage bonus so
+    # candidates matching MORE of the query win over single-term + high
+    # importance distractors (the "Scheduler" vs "FlowMatchEulerDiscreteScheduler"
+    # problem — the diffusion scheduler matches only 'scheduler' but has high
+    # importance; the LLM scheduler also matches 'batch' and should come first).
+    term_set_lc = {t.lower() for t in terms}
+
+    def _matched_terms(node) -> int:
+        name_lc = (node["name"] or "").lower()
+        path_lc = (node["file_path"] or "").lower()
+        # Tokenize name + path using the same splitter the query uses so
+        # camelCase and snake_case both count.
+        tokens = set(_tokenize_query(f"{name_lc} {path_lc}"))
+        return len({t for t in term_set_lc if t in tokens or t in name_lc or t in path_lc})
+
     def _score(node, match_score):
         kind_bonus = 1.5 if node["kind"] in ("function", "method") else 0.5
-        return match_score * 2.0 + node["importance"] * 0.15 + kind_bonus
+        coverage = _matched_terms(node)
+        return (
+            match_score * 2.0
+            + node["importance"] * 0.15
+            + kind_bonus
+            + coverage * 1.8
+        )
+
+    # Pre-compute coverage per node so we can (a) feed it into _score and
+    # (b) apply a hard demotion: a 1-term candidate only beats a 2+-term
+    # candidate if its importance is *massively* higher (>30 difference).
+    coverage_map: dict[str, int] = {
+        node["id"]: _matched_terms(node) for node, _ in scored_seeds
+    }
+    max_coverage = max(coverage_map.values(), default=0)
 
     scored_seeds.sort(key=lambda x: -_score(x[0], x[1]))
+
+    if max_coverage >= 2:
+        # If there's at least one 2+-term match, demote 1-term matches that
+        # don't have a huge importance cushion. Keeps diffusion-scheduler-type
+        # distractors out of the top even if they have high raw importance.
+        multi: list[tuple[dict, float]] = []
+        mono: list[tuple[dict, float]] = []
+        for node, ms in scored_seeds:
+            if coverage_map.get(node["id"], 0) >= 2:
+                multi.append((node, ms))
+            else:
+                mono.append((node, ms))
+        # Keep mono-term candidates only when no multi-term match dominates
+        # by importance (gap > 30). Otherwise push them to the tail.
+        top_multi_importance = multi[0][0]["importance"] if multi else 0
+        promoted_mono: list[tuple[dict, float]] = []
+        demoted_mono: list[tuple[dict, float]] = []
+        for node, ms in mono:
+            if node["importance"] - top_multi_importance > 30:
+                promoted_mono.append((node, ms))
+            else:
+                demoted_mono.append((node, ms))
+        scored_seeds = multi + promoted_mono + demoted_mono
 
     # Partition into strong-signal and weak-signal hits. A strong hit has at
     # least one query term in the node name OR the file path — a docstring-only
     # match isn't enough to stay in the primary list (it becomes secondary).
-    term_set_lc = {t.lower() for t in terms}
     strong: list[tuple[dict, float]] = []
     weak_demoted: list[dict] = []
     for node, ms in scored_seeds:

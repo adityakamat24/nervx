@@ -17,14 +17,14 @@ from nervx.memory.store import GraphStore
 # ── subcommand handlers ──────────────────────────────────────────────
 
 
-def ask_exists(store: GraphStore, symbol: str) -> dict:
-    node, _ = resolve_symbol(store, symbol)
+def ask_exists(store: GraphStore, symbol: str, pick: int | None = None) -> dict:
+    node, _ = resolve_symbol(store, symbol, pick=pick)
     return {"op": "exists", "query": symbol, "result": bool(node),
             "resolved_id": node["id"] if node else ""}
 
 
-def ask_signature(store: GraphStore, symbol: str) -> dict:
-    node, err = resolve_symbol(store, symbol)
+def ask_signature(store: GraphStore, symbol: str, pick: int | None = None) -> dict:
+    node, err = resolve_symbol(store, symbol, pick=pick)
     if node is None:
         return {"op": "signature", "query": symbol, "error": err}
     return {
@@ -35,8 +35,12 @@ def ask_signature(store: GraphStore, symbol: str) -> dict:
     }
 
 
-def ask_calls(store: GraphStore, caller: str, callee: str) -> dict:
-    src, err_s = resolve_symbol(store, caller)
+def ask_calls(
+    store: GraphStore, caller: str, callee: str, pick: int | None = None,
+) -> dict:
+    # --pick applies to the caller only; ambiguity on the callee still
+    # returns a did-you-mean.
+    src, err_s = resolve_symbol(store, caller, pick=pick)
     if src is None:
         return {"op": "calls", "error": err_s}
     dst, err_t = resolve_symbol(store, callee)
@@ -90,8 +94,8 @@ def ask_imports(store: GraphStore, file_path: str) -> dict:
     }
 
 
-def ask_is_async(store: GraphStore, symbol: str) -> dict:
-    node, err = resolve_symbol(store, symbol)
+def ask_is_async(store: GraphStore, symbol: str, pick: int | None = None) -> dict:
+    node, err = resolve_symbol(store, symbol, pick=pick)
     if node is None:
         return {"op": "is_async", "error": err}
     tags = _parse_tags(node.get("tags"))
@@ -100,8 +104,8 @@ def ask_is_async(store: GraphStore, symbol: str) -> dict:
     return {"op": "is_async", "resolved_id": node["id"], "result": is_async}
 
 
-def ask_returns_type(store: GraphStore, symbol: str) -> dict:
-    node, err = resolve_symbol(store, symbol)
+def ask_returns_type(store: GraphStore, symbol: str, pick: int | None = None) -> dict:
+    node, err = resolve_symbol(store, symbol, pick=pick)
     if node is None:
         return {"op": "returns_type", "error": err}
     sig = (node.get("signature") or "").strip()
@@ -117,8 +121,8 @@ def ask_returns_type(store: GraphStore, symbol: str) -> dict:
     }
 
 
-def ask_callers_count(store: GraphStore, symbol: str) -> dict:
-    node, err = resolve_symbol(store, symbol)
+def ask_callers_count(store: GraphStore, symbol: str, pick: int | None = None) -> dict:
+    node, err = resolve_symbol(store, symbol, pick=pick)
     if node is None:
         return {"op": "callers_count", "error": err}
     count = sum(
@@ -127,8 +131,8 @@ def ask_callers_count(store: GraphStore, symbol: str) -> dict:
     return {"op": "callers_count", "resolved_id": node["id"], "count": count}
 
 
-def ask_has_tests(store: GraphStore, symbol: str) -> dict:
-    node, err = resolve_symbol(store, symbol)
+def ask_has_tests(store: GraphStore, symbol: str, pick: int | None = None) -> dict:
+    node, err = resolve_symbol(store, symbol, pick=pick)
     if node is None:
         return {"op": "has_tests", "error": err}
     cov = test_coverage_for(store, node["id"], max_hops=3)
@@ -162,8 +166,18 @@ HANDLERS = {
 }
 
 
-def run_ask(store: GraphStore, subcommand: str, args: list[str]) -> dict:
-    """Dispatch a subcommand. ``args`` is the positional argument list."""
+def run_ask(
+    store: GraphStore,
+    subcommand: str,
+    args: list[str],
+    pick: int | None = None,
+) -> dict:
+    """Dispatch a subcommand. ``args`` is the positional argument list.
+
+    ``pick`` forwards to ``resolve_symbol`` so users can select the Nth
+    fuzzy candidate without retyping the fully-qualified id. ``imports``
+    takes a file path directly and ignores ``pick``.
+    """
     handler = HANDLERS.get(subcommand)
     if handler is None:
         return {"op": subcommand, "error": f"Unknown ask subcommand: {subcommand}"}
@@ -171,10 +185,13 @@ def run_ask(store: GraphStore, subcommand: str, args: list[str]) -> dict:
     if subcommand == "calls":
         if len(args) < 2:
             return {"op": "calls", "error": "Usage: nervx ask calls <A> <B>"}
-        return handler(store, args[0], args[1])
+        return handler(store, args[0], args[1], pick=pick)
     if len(args) < 1:
         return {"op": subcommand, "error": f"Usage: nervx ask {subcommand} <symbol>"}
-    return handler(store, args[0])
+    if subcommand == "imports":
+        # imports uses a file path, not a symbol id — fuzzy-pick doesn't apply.
+        return handler(store, args[0])
+    return handler(store, args[0], pick=pick)
 
 
 # ── formatting ───────────────────────────────────────────────────────

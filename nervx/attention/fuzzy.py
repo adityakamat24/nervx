@@ -7,9 +7,77 @@ a round-trip guessing the fully-qualified name.
 
 from __future__ import annotations
 
+import json
+import os
 from difflib import SequenceMatcher
 
 from nervx.memory.store import GraphStore
+
+
+# Categories that are almost never the "canonical" symbol when a user types
+# a plain Class.method shorthand — test fixtures, docs, examples, vendored
+# third-party, generated code, build scripts.
+_LOW_PRIORITY_CATEGORIES = frozenset({
+    "test", "doc", "example", "vendor", "generated", "script",
+})
+
+
+def _tiebreak_bonus(store: GraphStore, node_id: str, query_name: str) -> float:
+    """Composite tiebreaker for candidates sitting at the same fuzzy score.
+
+    Returns a small float (roughly in the range [-12, +5]) that only kicks
+    in when two or more candidates are tied at the top of the scored list.
+    Combines:
+      - category penalty (test/doc/example/vendor/generated/script → -10)
+      - importance bonus (+importance * 0.01)
+      - filename-class match bonus (+2 if basename matches the leading
+        class-name segment of the query)
+      - path depth penalty (-0.2 per segment beyond depth 3)
+    """
+    node = store.get_node(node_id)
+    if node is None:
+        return 0.0
+
+    bonus = 0.0
+
+    # Category penalty — parse tags list and scan for ``category:<name>``.
+    tags_raw = node.get("tags")
+    try:
+        tags = json.loads(tags_raw) if isinstance(tags_raw, str) else (tags_raw or [])
+    except (TypeError, ValueError):
+        tags = []
+    for t in tags:
+        if isinstance(t, str) and t.startswith("category:"):
+            cat = t.split(":", 1)[1].lower()
+            if cat in _LOW_PRIORITY_CATEGORIES:
+                bonus -= 10.0
+            break
+
+    # Importance bonus — small per-point so a high-importance core symbol
+    # beats a low-importance one without crowding out other signals.
+    try:
+        bonus += float(node.get("importance") or 0) * 0.01
+    except (TypeError, ValueError):
+        pass
+
+    # Filename/class match — if the query is "Scheduler.method", prefer the
+    # candidate whose file basename (stem) is literally "scheduler".
+    if "." in query_name:
+        class_part = query_name.split(".", 1)[0].lower()
+        file_path = (node.get("file_path") or "").replace("\\", "/")
+        basename = os.path.basename(file_path)
+        stem = basename.rsplit(".", 1)[0].lower() if "." in basename else basename.lower()
+        if stem and stem == class_part:
+            bonus += 2.0
+
+    # Path depth penalty — deeply-nested files are almost never the
+    # "canonical" definition the user meant.
+    file_path = (node.get("file_path") or "").replace("\\", "/")
+    depth = file_path.count("/")
+    if depth > 3:
+        bonus -= 0.2 * (depth - 3)
+
+    return bonus
 
 
 def fuzzy_find_symbol(store: GraphStore, query: str, limit: int = 5) -> list[str]:
@@ -155,6 +223,26 @@ def resolve_symbol(
         node = store.get_node(top_id)
         if node:
             return node, ""
+
+    # Tiebreak pass — when the top two share the same fuzzy score (typical
+    # for Class.method shorthand that hits multiple files), apply a composite
+    # tiebreaker (category / importance / filename-class / depth). If after
+    # tiebreak the top candidate strictly beats the rest, auto-resolve it.
+    # Otherwise fall through to the did-you-mean list below.
+    query_name = query.split("::")[-1] if "::" in query else query
+    tied = [sc for sc in scored if sc[1] == top_score]
+    if len(tied) >= 2:
+        reranked = sorted(
+            tied,
+            key=lambda sc: -(sc[1] + _tiebreak_bonus(store, sc[0], query_name)),
+        )
+        best_id, _ = reranked[0]
+        best_bonus = _tiebreak_bonus(store, best_id, query_name)
+        runner_bonus = _tiebreak_bonus(store, reranked[1][0], query_name)
+        if best_bonus > runner_bonus:
+            node = store.get_node(best_id)
+            if node:
+                return node, ""
 
     lines = [f"Symbol not found: {query}", "", "Did you mean:"]
     for i, (s, _) in enumerate(scored, 1):
