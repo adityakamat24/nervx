@@ -25,14 +25,18 @@ _LOW_PRIORITY_CATEGORIES = frozenset({
 def _tiebreak_bonus(store: GraphStore, node_id: str, query_name: str) -> float:
     """Composite tiebreaker for candidates sitting at the same fuzzy score.
 
-    Returns a small float (roughly in the range [-12, +5]) that only kicks
-    in when two or more candidates are tied at the top of the scored list.
+    Scale-invariant — no hardcoded importance thresholds or absolute-depth
+    cutoffs, so the tiebreaker works the same way on a 50-file prototype
+    and a 50k-file monorepo, in Python, Java, Go, or any other layout.
     Combines:
       - category penalty (test/doc/example/vendor/generated/script → -10)
-      - importance bonus (+importance * 0.01)
+        — "canonical" lookups almost never mean the test-mock version.
+      - importance bonus (+importance * 0.01) — high-importance symbols
+        beat low-importance ones when all else is equal. The 0.01 scale
+        is tiny enough that a category penalty (-10) always dominates.
       - filename-class match bonus (+2 if basename matches the leading
-        class-name segment of the query)
-      - path depth penalty (-0.2 per segment beyond depth 3)
+        class-name segment of the query) — language-agnostic convention:
+        ``Foo`` typically lives in ``foo.py``/``Foo.java``/``foo.go``.
     """
     node = store.get_node(node_id)
     if node is None:
@@ -60,8 +64,10 @@ def _tiebreak_bonus(store: GraphStore, node_id: str, query_name: str) -> float:
     except (TypeError, ValueError):
         pass
 
-    # Filename/class match — if the query is "Scheduler.method", prefer the
-    # candidate whose file basename (stem) is literally "scheduler".
+    # Filename/class match — if the query is "Foo.method", prefer the
+    # candidate whose file basename (stem) is literally "foo". Works the
+    # same across Python (foo.py), Go (foo.go), Rust (foo.rs), Java
+    # (Foo.java), C# (Foo.cs), etc.
     if "." in query_name:
         class_part = query_name.split(".", 1)[0].lower()
         file_path = (node.get("file_path") or "").replace("\\", "/")
@@ -69,13 +75,6 @@ def _tiebreak_bonus(store: GraphStore, node_id: str, query_name: str) -> float:
         stem = basename.rsplit(".", 1)[0].lower() if "." in basename else basename.lower()
         if stem and stem == class_part:
             bonus += 2.0
-
-    # Path depth penalty — deeply-nested files are almost never the
-    # "canonical" definition the user meant.
-    file_path = (node.get("file_path") or "").replace("\\", "/")
-    depth = file_path.count("/")
-    if depth > 3:
-        bonus -= 0.2 * (depth - 3)
 
     return bonus
 
@@ -225,10 +224,11 @@ def resolve_symbol(
             return node, ""
 
     # Tiebreak pass — when the top two share the same fuzzy score (typical
-    # for Class.method shorthand that hits multiple files), apply a composite
-    # tiebreaker (category / importance / filename-class / depth). If after
-    # tiebreak the top candidate strictly beats the rest, auto-resolve it.
-    # Otherwise fall through to the did-you-mean list below.
+    # for Class.method shorthand that hits multiple files across a large
+    # repo), apply a composite tiebreaker (category / importance /
+    # filename-class match). If after tiebreak the top candidate strictly
+    # beats the rest, auto-resolve it. Otherwise fall through to the
+    # did-you-mean list below so the user still has the last word.
     query_name = query.split("::")[-1] if "::" in query else query
     tied = [sc for sc in scored if sc[1] == top_score]
     if len(tied) >= 2:

@@ -207,11 +207,10 @@ def navigate(
             break
 
     # Step 3: Score and rank.
-    # Keyword relevance dominates, with an explicit term-coverage bonus so
-    # candidates matching MORE of the query win over single-term + high
-    # importance distractors (the "Scheduler" vs "FlowMatchEulerDiscreteScheduler"
-    # problem — the diffusion scheduler matches only 'scheduler' but has high
-    # importance; the LLM scheduler also matches 'batch' and should come first).
+    # Keyword relevance dominates; importance is a weak tiebreaker; and a
+    # term-coverage bonus rewards candidates that match MORE of the user's
+    # query terms. The ranking is scale-invariant — no hardcoded importance
+    # cutoffs — so it behaves the same on a tiny script or a monorepo.
     term_set_lc = {t.lower() for t in terms}
 
     def _matched_terms(node) -> int:
@@ -232,38 +231,19 @@ def navigate(
             + coverage * 1.8
         )
 
-    # Pre-compute coverage per node so we can (a) feed it into _score and
-    # (b) apply a hard demotion: a 1-term candidate only beats a 2+-term
-    # candidate if its importance is *massively* higher (>30 difference).
+    # Pre-compute coverage per node so we can apply a hard partition after
+    # both the _score sort AND the cohesion penalty (step 3b) have run:
+    # whenever at least one candidate matches 2+ query terms, single-term
+    # candidates can't jump above multi-term ones. This is the real fix
+    # for concept-name collisions — e.g. a query like "X form Y from Z"
+    # should prefer a node matching two of {X, Y, Z} over a node matching
+    # only X, regardless of how important X-only is.
     coverage_map: dict[str, int] = {
         node["id"]: _matched_terms(node) for node, _ in scored_seeds
     }
     max_coverage = max(coverage_map.values(), default=0)
 
     scored_seeds.sort(key=lambda x: -_score(x[0], x[1]))
-
-    if max_coverage >= 2:
-        # If there's at least one 2+-term match, demote 1-term matches that
-        # don't have a huge importance cushion. Keeps diffusion-scheduler-type
-        # distractors out of the top even if they have high raw importance.
-        multi: list[tuple[dict, float]] = []
-        mono: list[tuple[dict, float]] = []
-        for node, ms in scored_seeds:
-            if coverage_map.get(node["id"], 0) >= 2:
-                multi.append((node, ms))
-            else:
-                mono.append((node, ms))
-        # Keep mono-term candidates only when no multi-term match dominates
-        # by importance (gap > 30). Otherwise push them to the tail.
-        top_multi_importance = multi[0][0]["importance"] if multi else 0
-        promoted_mono: list[tuple[dict, float]] = []
-        demoted_mono: list[tuple[dict, float]] = []
-        for node, ms in mono:
-            if node["importance"] - top_multi_importance > 30:
-                promoted_mono.append((node, ms))
-            else:
-                demoted_mono.append((node, ms))
-        scored_seeds = multi + promoted_mono + demoted_mono
 
     # Partition into strong-signal and weak-signal hits. A strong hit has at
     # least one query term in the node name OR the file path — a docstring-only
@@ -312,6 +292,25 @@ def navigate(
                         penalized.append((node, ms * 0.3))
                 penalized.sort(key=lambda x: -_score(x[0], x[1]))
                 strong = penalized
+
+    # Step 3c: Coverage-tier partition. Applied AFTER cohesion so the
+    # re-sort on raw _score can't put a lower-coverage high-importance
+    # distractor back at the top. Scale-invariant and generalized across
+    # any number of query terms: candidates matching the maximum number
+    # of query terms always beat candidates matching fewer, regardless of
+    # importance gap. Within a tier, _score (importance + kind + cohesion)
+    # still decides order. Lower-coverage candidates stay visible in the
+    # tail and the secondary list.
+    if max_coverage >= 2:
+        best = [
+            (n, ms) for n, ms in strong
+            if coverage_map.get(n["id"], 0) == max_coverage
+        ]
+        rest = [
+            (n, ms) for n, ms in strong
+            if coverage_map.get(n["id"], 0) < max_coverage
+        ]
+        strong = best + rest
 
     # Step 4: Take top N strong hits as primary
     primary = [s[0] for s in strong[:budget]]
