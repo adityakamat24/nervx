@@ -192,16 +192,27 @@ def analyze_contracts(store: GraphStore, parse_results=None):
     if parse_results is None:
         return
 
-    from nervx.perception.linker import build_symbol_index, _resolve_single_call, _build_import_map
+    # 0.2.6: the linker now fans out to multiple candidates per RawCall
+    # when disambiguation is ambiguous. For contract analysis we only want
+    # the HIGH-confidence resolutions — speculative fan-out pairings
+    # would pollute ``error_handling`` / ``return_usage`` stats with
+    # bindings that may not hold at runtime. Take the first candidate
+    # only when the linker returned a ``"high"`` tag.
+    from nervx.perception.linker import (
+        build_symbol_index, _resolve_candidates, _build_import_map,
+    )
 
     symbol_index = build_symbol_index(parse_results)
     import_map = _build_import_map(parse_results)
 
     for pr in parse_results:
         for rc in pr.raw_calls:
-            target = _resolve_single_call(rc, pr.file_path, symbol_index, import_map)
-            if target is None:
+            targets, confidence = _resolve_candidates(
+                rc, pr.file_path, symbol_index, import_map,
+            )
+            if not targets or confidence != "high":
                 continue
+            target = targets[0]
 
             error_handling = "none"
             if rc.error_handling:

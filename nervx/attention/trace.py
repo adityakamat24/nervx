@@ -43,7 +43,14 @@ def trace_path(
     resolution: str = "calls"  # "calls" (strict) | "inheritance" (soft) | ""
 
     if not via_inheritance:
-        path = bfs_path(store, src["id"], dst["id"], edge_type="calls", max_depth=8)
+        # 0.2.6: strict ``calls`` pass — ignore low-confidence fan-out edges
+        # so we only surface paths the linker was certain about. If nothing
+        # strict is found, the inheritance fallback below can still walk
+        # the low-confidence edges as additional evidence.
+        path = bfs_path(
+            store, src["id"], dst["id"],
+            edge_type="calls", max_depth=8, strict=True,
+        )
         if path:
             resolution = "calls"
 
@@ -51,7 +58,8 @@ def trace_path(
         # Fallback: include inheritance + dispatches_to edges. This does NOT
         # guarantee a runtime path; it's evidence that source reaches target
         # through a base class (and possibly a polymorphic override) in the
-        # static graph.
+        # static graph. Kept non-strict so a low-confidence ``calls`` edge
+        # can still contribute to a soft inheritance-backed path.
         path = bfs_path(
             store,
             src["id"],

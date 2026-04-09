@@ -56,12 +56,16 @@ def verify_statement(store: GraphStore, statement: str) -> dict | str:
     if target_node is None:
         return f"verify: could not resolve right-hand symbol '{right}'.\n{err_t}"
 
+    # 0.2.6: ``verify`` makes a truth claim — it must only confirm paths
+    # the linker was confident about. Strict mode drops fan-out edges so
+    # we never say "A calls B" based on speculative receiver resolution.
     path = bfs_path(
         store,
         source_node["id"],
         target_node["id"],
         edge_type=edge_type,
         max_depth=6,
+        strict=(edge_type == "calls"),
     )
 
     if path:

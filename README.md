@@ -129,7 +129,8 @@ All stored in a single SQLite database (`.nervx/brain.db`), queryable in millise
 | `nervx flows [keyword]` | End-to-end execution paths |
 | `nervx diff --days 7` | Recent structural changes |
 | `nervx cochange <file> --why` | Co-modified files with the commit hashes behind each coupling |
-| `nervx string-refs <identifier>` | Every file:line where a string literal appears (all languages) |
+| `nervx string-refs <identifier>` | Every file:line where the identifier appears **as a quoted string literal** (JSON/YAML keys, dict subscripts) |
+| `nervx uses <identifier>` | Every source line where the identifier appears **as a bare token** (attribute access, assignments, type hints, destructuring — complements string-refs) |
 
 ### Diagnostics
 | Command | What it does |
@@ -171,6 +172,35 @@ nervx watch .
 ```
 
 Auto-updates the brain when files change.
+
+## Changelog
+
+### 0.2.6
+
+- **Instance-method dispatch** — the Python parser now infers a receiver
+  type for `sp.verify()` style calls by scanning local assignments
+  (`sp = SamplingParams()`), annotations (`sp: SamplingParams`), parameter
+  hints, and `self.foo = Foo()` in `__init__`. The linker uses the hint
+  to pick the correct class when a method name is shared. When a receiver
+  type is unknown, the linker fans out to every plausible candidate and
+  marks the edge with `confidence="low"` so coverage and caller counts
+  still see the call. Strict consumers (`ask calls`, `verify`, `trace`)
+  filter out the low-confidence edges.
+- **Full import index** — every `import`/`use`/`using`/`require` now
+  persists to a new `raw_imports` table, including external modules
+  (numpy, torch, std, `java.util.List`, `System.Text`, ...). `ask imports
+  <file>` returns the full picture instead of only intra-project
+  resolutions.
+- **`nervx uses <identifier>`** — new command. Scans source lines for
+  bare-token occurrences of an identifier (attribute access, assignments,
+  type hints, destructuring, match arms). Complements `string-refs`,
+  which remains the quoted-literal-only lookup.
+
+### 0.2.5
+
+- Scale-invariant fuzzy symbol resolution and coverage-tier navigation
+  ranking — consistent behavior from 50-file prototypes to 50k-file
+  monorepos.
 
 ## License
 

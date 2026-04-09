@@ -15,7 +15,7 @@ from nervx.memory.store import GraphStore
 from nervx.perception.git_miner import GitMiner, is_git_repo
 from nervx.perception.ignore import load_ignore_patterns, should_ignore
 from nervx.perception.languages import get_supported_extensions
-from nervx.perception.linker import resolve_all
+from nervx.perception.linker import collect_raw_imports, resolve_all
 from nervx.perception.parser import extract_keywords, parse_file
 
 # Directories to exclude during file walk.
@@ -423,6 +423,16 @@ def full_build(repo_root: str, db_path: str):
         for e in edges:
             store.add_edge(e.source_id, e.target_id, e.edge_type, e.weight, e.metadata)
 
+    # Phase 4b (0.2.6): persist every raw import — intra-project AND
+    # external — so `ask imports <file>` can show numpy/torch/std imports
+    # that never produced an intra-project edge.
+    try:
+        raw_import_rows = collect_raw_imports(parse_results)
+        if raw_import_rows:
+            store.add_raw_imports_bulk(raw_import_rows)
+    except Exception as e:
+        print(f"Warning: raw-imports persistence failed: {e}", file=sys.stderr)
+
     # Phase 5: Mine git
     if is_git_repo(repo_root):
         miner = GitMiner(repo_root)
@@ -557,6 +567,18 @@ def incremental_update(repo_root: str, db_path: str):
     with store.batch():
         for e in edges:
             store.add_edge(e.source_id, e.target_id, e.edge_type, e.weight, e.metadata)
+
+    # 0.2.6: refresh raw_imports table too — clear all rows then re-bulk
+    # insert. Simpler than incremental per-file diffing and cheap compared
+    # to a full re-parse.
+    try:
+        store.conn.execute("DELETE FROM raw_imports")
+        store.conn.commit()
+        raw_import_rows = collect_raw_imports(parse_results)
+        if raw_import_rows:
+            store.add_raw_imports_bulk(raw_import_rows)
+    except Exception as e:
+        print(f"Warning: raw-imports persistence failed: {e}", file=sys.stderr)
 
     # Re-compute content hashes and string-literal index for all files.
     # Cheap enough (one file read per source file) and guarantees --since

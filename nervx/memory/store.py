@@ -537,6 +537,40 @@ class GraphStore:
         )
         self._commit()
 
+    # ── Raw import operations ───────────────────────────────────
+    #
+    # 0.2.6: `raw_imports` is the ground-truth list of every import a file
+    # declares (intra-project AND external). The edges table only stores
+    # intra-project `imports` edges; this table lets `ask imports <file>`
+    # show the full picture — numpy, torch, std, first-party, etc.
+
+    def add_raw_imports_bulk(
+        self, rows: list[tuple[str, str, str, int, str]]
+    ):
+        """rows: (file_path, module_path, imported_names_json, is_from_import, resolved_to_file)"""
+        self.conn.executemany(
+            """INSERT OR REPLACE INTO raw_imports
+               (file_path, module_path, imported_names, is_from_import, resolved_to_file)
+               VALUES (?, ?, ?, ?, ?)""",
+            rows,
+        )
+        self._commit()
+
+    def delete_raw_imports_for_file(self, file_path: str):
+        self.conn.execute(
+            "DELETE FROM raw_imports WHERE file_path = ?", (file_path,)
+        )
+        self._commit()
+
+    def get_raw_imports(self, file_path: str) -> list[dict]:
+        rows = self.conn.execute(
+            """SELECT module_path, imported_names, is_from_import, resolved_to_file
+               FROM raw_imports WHERE file_path = ?
+               ORDER BY is_from_import, module_path""",
+            (file_path,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     # ── Meta operations ──────────────────────────────────────────
 
     def set_meta(self, key: str, value: str):
@@ -559,6 +593,7 @@ class GraphStore:
             "nodes", "edges", "cochanges", "keywords",
             "file_stats", "file_hashes", "concept_paths",
             "patterns", "contracts", "meta", "string_refs",
+            "raw_imports",
         ]:
             self.conn.execute(f"DELETE FROM {table}")
         self._commit()
@@ -596,6 +631,9 @@ class GraphStore:
         )
         self.conn.execute(
             "DELETE FROM string_refs WHERE file_path = ?", (file_path,)
+        )
+        self.conn.execute(
+            "DELETE FROM raw_imports WHERE file_path = ?", (file_path,)
         )
         self._commit()
 

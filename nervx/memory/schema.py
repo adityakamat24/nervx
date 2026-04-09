@@ -102,6 +102,20 @@ CREATE TABLE IF NOT EXISTS string_refs (
 CREATE INDEX IF NOT EXISTS idx_string_refs_literal ON string_refs(literal);
 CREATE INDEX IF NOT EXISTS idx_string_refs_file ON string_refs(file_path);
 
+-- 0.2.6: raw imports persisted per-file so `ask imports <file>` can report
+-- EVERY import (intra-project AND external like numpy/torch/std). The edges
+-- table only stores intra-project import resolutions; this table is the
+-- full ground truth emitted by each language parser.
+CREATE TABLE IF NOT EXISTS raw_imports (
+    file_path TEXT NOT NULL,
+    module_path TEXT NOT NULL,
+    imported_names TEXT DEFAULT '[]',
+    is_from_import INTEGER DEFAULT 0,
+    resolved_to_file TEXT DEFAULT '',
+    PRIMARY KEY (file_path, module_path, imported_names)
+);
+CREATE INDEX IF NOT EXISTS idx_raw_imports_file ON raw_imports(file_path);
+
 CREATE INDEX IF NOT EXISTS idx_nodes_file ON nodes(file_path);
 CREATE INDEX IF NOT EXISTS idx_nodes_kind ON nodes(kind);
 CREATE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name);

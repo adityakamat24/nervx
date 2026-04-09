@@ -47,10 +47,15 @@ def ask_calls(
     if dst is None:
         return {"op": "calls", "error": err_t}
 
+    # 0.2.6: ``ask calls`` is a strict truth-check ("does A definitely call
+    # B?"). Low-confidence fan-out edges are excluded so we don't return a
+    # spurious "yes" when the linker couldn't disambiguate a method name.
     row = store.conn.execute(
         """
         SELECT metadata FROM edges
         WHERE source_id = ? AND target_id = ? AND edge_type = 'calls'
+          AND (json_extract(metadata, '$.confidence') IS NULL
+               OR json_extract(metadata, '$.confidence') != 'low')
         LIMIT 1
         """,
         (src["id"], dst["id"]),
@@ -72,11 +77,18 @@ def ask_calls(
 
 
 def ask_imports(store: GraphStore, file_path: str) -> dict:
+    """0.2.6: query the `raw_imports` table instead of `edges`.
+
+    The edges table only holds intra-project imports (those that resolved
+    to a file we parsed). The new ``raw_imports`` table stores every
+    declared import, so external libraries (numpy, torch, std, ...) now
+    show up in ``ask imports`` just like first-party modules.
+    """
     rel = file_path.replace("\\", "/")
     # File nodes are keyed by their relative path as the ID.
     file_node = store.get_node(rel)
     if file_node is None:
-        # Try suffix match.
+        # Try suffix match against indexed file nodes.
         for n in store.get_nodes_by_kind("file"):
             if n["id"].endswith("/" + rel) or n["id"] == rel:
                 file_node = n
@@ -84,13 +96,34 @@ def ask_imports(store: GraphStore, file_path: str) -> dict:
     if file_node is None:
         return {"op": "imports", "query": file_path,
                 "error": f"File node not found: {file_path}"}
-    edges = store.get_edges_from(file_node["id"])
-    targets = [e["target_id"] for e in edges if e["edge_type"] == "imports"]
+
+    rows = store.conn.execute(
+        """
+        SELECT module_path, imported_names, is_from_import, resolved_to_file
+        FROM raw_imports WHERE file_path = ?
+        ORDER BY is_from_import, module_path
+        """,
+        (file_node["id"],),
+    ).fetchall()
+
+    imports: list[dict] = []
+    for r in rows:
+        try:
+            names = json.loads(r["imported_names"] or "[]")
+        except (TypeError, ValueError):
+            names = []
+        imports.append({
+            "module": r["module_path"],
+            "names": names,
+            "is_from_import": bool(r["is_from_import"]),
+            "resolves_to": r["resolved_to_file"] or None,
+        })
+
     return {
         "op": "imports",
         "file": file_node["id"],
-        "imports": targets,
-        "count": len(targets),
+        "imports": imports,
+        "count": len(imports),
     }
 
 
@@ -212,9 +245,32 @@ def format_ask(result: dict) -> str:
             return f"yes (line {line})" if line else "yes"
         return "no"
     if op == "imports":
-        if not result.get("imports"):
+        imports = result.get("imports") or []
+        if not imports:
             return "(no imports indexed)"
-        return "\n".join(result["imports"])
+        # 0.2.6: entries are dicts with module/names/is_from_import/resolves_to.
+        lines: list[str] = []
+        for imp in imports:
+            if isinstance(imp, str):
+                # Back-compat: old brain shape is a plain list of target ids.
+                lines.append(imp)
+                continue
+            module = imp.get("module", "")
+            names = imp.get("names") or []
+            if imp.get("is_from_import"):
+                names_text = ", ".join(names) if names else "*"
+                line = f"from {module} import {names_text}"
+            else:
+                if names and names[0] and names[0] != module:
+                    # e.g. ``import numpy as np`` exposes "np"
+                    line = f"import {module} as {names[0]}"
+                else:
+                    line = f"import {module}"
+            resolves = imp.get("resolves_to")
+            if resolves:
+                line += f"  (-> {resolves})"
+            lines.append(line)
+        return "\n".join(lines)
     if op == "is_async":
         return "yes" if result["result"] else "no"
     if op == "returns_type":

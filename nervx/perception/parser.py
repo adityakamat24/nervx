@@ -34,6 +34,13 @@ class RawCall:
     line: int
     error_handling: dict | None = None  # {"pattern": "try_except", "exception": "ValueError"}
     return_usage: str = "ignored"       # "assigned", "checked", "ignored", "awaited", "awaited_ignored", "returned"
+    # 0.2.6: inferred class name of the call receiver (e.g. ``SamplingParams``
+    # for ``sp.verify()`` when ``sp`` was previously assigned
+    # ``sp = SamplingParams(...)``). Populated by the Python parser only today;
+    # used by the linker to disambiguate method calls that collide across
+    # multiple classes. Empty string when unknown — the linker then falls back
+    # to its existing fan-out strategy.
+    receiver_type: str = ""
 
 
 @dataclass
@@ -342,7 +349,8 @@ def _process_top_level(ts_node, rel_path: str, file_id: str, result: ParseResult
 # ── Decorated definition unwrapping ────────────────────────────────
 
 def _process_decorated(ts_node, rel_path: str, parent_id: str, result: ParseResult,
-                       is_method: bool, class_name: str | None):
+                       is_method: bool, class_name: str | None,
+                       class_self_types: dict[str, str] | None = None):
     """Unwrap a decorated_definition to get decorators and the inner def/class."""
     decorators = []
     inner = None
@@ -363,7 +371,8 @@ def _process_decorated(ts_node, rel_path: str, parent_id: str, result: ParseResu
     elif inner.type == "function_definition":
         _process_function(inner, rel_path, parent_id, result,
                           is_method=is_method, class_name=class_name,
-                          decorators=decorators)
+                          decorators=decorators,
+                          class_self_types=class_self_types)
 
 
 # ── Class processing ───────────────────────────────────────────────
@@ -419,15 +428,24 @@ def _process_class(ts_node, rel_path: str, parent_id: str, result: ParseResult,
     )
     result.nodes.append(class_node)
 
+    # 0.2.6: aggregate ``self.foo = Class(...)`` assignments across every
+    # method in the class so each method's call extractor can resolve
+    # ``self.store.get()`` to the type assigned in ``__init__`` (or any
+    # other method that sets ``self.store``).
+    class_self_types = _collect_class_self_types(body) if body is not None else {}
+
     # Process class body for methods
     if body is not None:
         for child in body.children:
             if child.type == "function_definition":
                 _process_function(child, rel_path, node_id, result,
-                                  is_method=True, class_name=class_name, decorators=[])
+                                  is_method=True, class_name=class_name,
+                                  decorators=[],
+                                  class_self_types=class_self_types)
             elif child.type == "decorated_definition":
                 _process_decorated(child, rel_path, node_id, result,
-                                   is_method=True, class_name=class_name)
+                                   is_method=True, class_name=class_name,
+                                   class_self_types=class_self_types)
             elif child.type == "class_definition":
                 # Nested class
                 _process_class(child, rel_path, node_id, result, decorators=[])
@@ -436,7 +454,8 @@ def _process_class(ts_node, rel_path: str, parent_id: str, result: ParseResult,
 # ── Function/method processing ─────────────────────────────────────
 
 def _process_function(ts_node, rel_path: str, parent_id: str, result: ParseResult,
-                      is_method: bool, class_name: str | None, decorators: list):
+                      is_method: bool, class_name: str | None, decorators: list,
+                      class_self_types: dict[str, str] | None = None):
     """Extract a function or method definition."""
     name_node = ts_node.child_by_field_name("name")
     if name_node is None:
@@ -489,9 +508,21 @@ def _process_function(ts_node, rel_path: str, parent_id: str, result: ParseResul
     )
     result.nodes.append(func_node)
 
+    # 0.2.6: build receiver-type map for this function scope. Merge the
+    # class-level ``self.foo`` map (if this is a method) as a baseline so
+    # ``self.store.get()`` inside any method can see the type assigned to
+    # ``self.store`` in ``__init__``.
+    params_node = ts_node.child_by_field_name("parameters")
+    method_locals = _scan_function_local_types(body, params_node)
+    if class_self_types:
+        merged_locals: dict[str, str] = {**class_self_types, **method_locals}
+    else:
+        merged_locals = method_locals
+
     # Extract calls from the function body
     if body is not None:
-        _extract_calls_from_body(body, node_id, result)
+        _extract_calls_from_body(body, node_id, result,
+                                 local_types=merged_locals)
 
 
 # ── Signature building ─────────────────────────────────────────────
@@ -807,17 +838,171 @@ def _process_import(ts_node, rel_path: str, result: ParseResult):
         ))
 
 
+# ── Local-type inference (0.2.6, Gap 1 Layer A) ────────────────────
+#
+# Python-specific receiver-type scanner. For each function/method we build a
+# `local_types: dict[str, str]` map that answers the question
+# "if I see `x.foo()`, what class is `x` most likely an instance of?".
+# Later, the linker uses this to pick the right `Class.foo` candidate from
+# symbol_index instead of guessing.
+#
+# Sources of type information (best-effort — never crashes on unknown forms):
+#   1. Explicit type annotations:      ``x: SamplingParams``
+#   2. Annotated assignments:           ``x: SamplingParams = f()``
+#   3. Constructor-call inference:      ``x = ClassName(...)``  → "ClassName"
+#   4. Parameter type hints:            ``def f(self, sp: SamplingParams):``
+#   5. Per-class ``self.foo = Class(...)`` aggregated across all methods
+#      of the enclosing class, so ``self.store.get()`` in method A sees
+#      the type assigned to ``self.store`` in ``__init__``.
+
+def _simplify_type_annotation(type_text: str) -> str:
+    """Reduce a type annotation to the primary class name if possible.
+
+    ``SamplingParams``                 → ``SamplingParams``
+    ``Optional[SamplingParams]``       → ``SamplingParams``
+    ``SamplingParams | None``          → ``SamplingParams``
+    ``list[Foo]``, ``dict[str, Foo]``  → ``""`` (collection container wins; skip)
+    """
+    t = (type_text or "").strip()
+    if not t:
+        return ""
+    if t.startswith('"') or t.startswith("'"):
+        t = t.strip("\"'")
+    if t.startswith("Optional[") and t.endswith("]"):
+        t = t[len("Optional["):-1].strip()
+    if "|" in t:
+        parts = [p.strip() for p in t.split("|")]
+        non_none = [p for p in parts if p and p != "None"]
+        if len(non_none) == 1:
+            t = non_none[0]
+        else:
+            return ""
+    # Bare identifier? (letters/digits/underscore, not starting with digit)
+    if t and not t[0].isdigit() and all(c.isalnum() or c == "_" for c in t):
+        return t
+    return ""
+
+
+def _record_type_from_assignment(assign_node, var_name: str,
+                                 out: dict[str, str]) -> None:
+    """Update ``out`` with a type for ``var_name`` from an assignment node.
+
+    Prefers explicit type annotations; falls back to constructor inference
+    (RHS is ``ClassName(...)`` and ``ClassName`` starts with uppercase).
+    """
+    type_node = assign_node.child_by_field_name("type")
+    right = assign_node.child_by_field_name("right")
+
+    if type_node is not None:
+        simple = _simplify_type_annotation(_text(type_node))
+        if simple:
+            out[var_name] = simple
+            return
+
+    if right is not None and right.type == "call":
+        func_node = right.child_by_field_name("function")
+        if func_node is not None and func_node.type == "identifier":
+            class_name = _text(func_node)
+            if class_name and class_name[0].isupper():
+                out[var_name] = class_name
+
+
+def _extract_param_type(param_node, local_types: dict[str, str]) -> None:
+    """Pull ``name: Type`` from a function parameters list entry."""
+    if param_node.type not in ("typed_parameter", "typed_default_parameter"):
+        return
+    name = None
+    type_text = None
+    for child in param_node.children:
+        if name is None and child.type == "identifier":
+            name = _text(child)
+        elif child.type == "type":
+            type_text = _text(child)
+    if name and type_text:
+        simple = _simplify_type_annotation(type_text)
+        if simple:
+            local_types[name] = simple
+
+
+def _scan_method_body_for_types(node, local_types: dict[str, str]) -> None:
+    """Walk a method/function body collecting local-variable types.
+
+    Doesn't descend into nested function or class definitions — those have
+    their own scope and will be scanned when they get processed.
+    """
+    nt = node.type
+    if nt in ("function_definition", "class_definition", "decorated_definition"):
+        return
+
+    if nt == "assignment":
+        left = node.child_by_field_name("left")
+        if left is not None:
+            if left.type == "identifier":
+                _record_type_from_assignment(node, _text(left), local_types)
+            elif left.type == "attribute":
+                name = _text(left)
+                if name.startswith("self."):
+                    _record_type_from_assignment(node, name, local_types)
+
+    for child in node.children:
+        _scan_method_body_for_types(child, local_types)
+
+
+def _scan_function_local_types(body_node, params_node) -> dict[str, str]:
+    """Build the receiver-type map for a single function/method scope."""
+    local_types: dict[str, str] = {}
+
+    if params_node is not None:
+        for child in params_node.children:
+            _extract_param_type(child, local_types)
+
+    if body_node is not None:
+        _scan_method_body_for_types(body_node, local_types)
+
+    return local_types
+
+
+def _collect_class_self_types(class_body) -> dict[str, str]:
+    """Collect ``self.foo = ClassName(...)`` across every method of a class.
+
+    Captures ``self.X`` assignments from ``__init__`` *and* from any other
+    method — users sometimes lazy-initialize attributes outside ``__init__``.
+    Stops at nested class definitions, whose ``self`` means something else.
+    """
+    self_types: dict[str, str] = {}
+    if class_body is None:
+        return self_types
+
+    def walk(node):
+        if node.type == "class_definition":
+            return
+        if node.type == "assignment":
+            left = node.child_by_field_name("left")
+            if left is not None and left.type == "attribute":
+                name = _text(left)
+                if name.startswith("self."):
+                    _record_type_from_assignment(node, name, self_types)
+        for child in node.children:
+            walk(child)
+
+    walk(class_body)
+    return self_types
+
+
 # ── Call extraction ────────────────────────────────────────────────
 
-def _extract_calls_from_body(body_node, caller_id: str, result: ParseResult):
+def _extract_calls_from_body(body_node, caller_id: str, result: ParseResult,
+                             local_types: dict[str, str] | None = None):
     """Walk a function body to find all call expressions and record them."""
     # We need to track which try/except context each call is in
     for child in body_node.children:
-        _walk_for_calls(child, caller_id, result, error_context=None)
+        _walk_for_calls(child, caller_id, result, error_context=None,
+                        local_types=local_types)
 
 
 def _walk_for_calls(ts_node, caller_id: str, result: ParseResult,
-                    error_context: dict | None):
+                    error_context: dict | None,
+                    local_types: dict[str, str] | None = None):
     """Recursively walk to find call expressions, tracking error context."""
     node_type = ts_node.type
 
@@ -827,25 +1012,27 @@ def _walk_for_calls(ts_node, caller_id: str, result: ParseResult,
 
     # Handle try_statement: update error context for calls inside
     if node_type == "try_statement":
-        _process_try_statement(ts_node, caller_id, result)
+        _process_try_statement(ts_node, caller_id, result, local_types)
         return
 
     # Handle call expressions
     if node_type == "call":
-        _record_call(ts_node, caller_id, result, error_context)
+        _record_call(ts_node, caller_id, result, error_context, local_types)
         # Still need to walk arguments for nested calls
         args = ts_node.child_by_field_name("arguments")
         if args is not None:
             for child in args.children:
-                _walk_for_calls(child, caller_id, result, error_context)
+                _walk_for_calls(child, caller_id, result, error_context,
+                                local_types)
         return
 
     # Recurse into children
     for child in ts_node.children:
-        _walk_for_calls(child, caller_id, result, error_context)
+        _walk_for_calls(child, caller_id, result, error_context, local_types)
 
 
-def _process_try_statement(ts_node, caller_id: str, result: ParseResult):
+def _process_try_statement(ts_node, caller_id: str, result: ParseResult,
+                           local_types: dict[str, str] | None = None):
     """Process a try/except statement, tracking exception types for calls in the try block."""
     # Collect exception types from except clauses
     exception_types = []
@@ -872,7 +1059,8 @@ def _process_try_statement(ts_node, caller_id: str, result: ParseResult):
         if child.type == "block":
             # First block child of try_statement is the try body
             for block_child in child.children:
-                _walk_for_calls(block_child, caller_id, result, error_context)
+                _walk_for_calls(block_child, caller_id, result, error_context,
+                                local_types)
             break
 
     # Walk except/else/finally blocks without the error context (or with their own)
@@ -880,7 +1068,8 @@ def _process_try_statement(ts_node, caller_id: str, result: ParseResult):
         if child.type in ("except_clause", "else_clause", "finally_clause"):
             for sub in child.children:
                 if sub.type == "block":
-                    _walk_for_calls(sub, caller_id, result, error_context=None)
+                    _walk_for_calls(sub, caller_id, result, error_context=None,
+                                    local_types=local_types)
 
 
 def _extract_except_type(except_node) -> str | None:
@@ -904,7 +1093,8 @@ def _extract_except_type(except_node) -> str | None:
 
 
 def _record_call(call_node, caller_id: str, result: ParseResult,
-                 error_context: dict | None):
+                 error_context: dict | None,
+                 local_types: dict[str, str] | None = None):
     """Record a single call expression as a RawCall."""
     # Get callee text (the function being called)
     func_node = call_node.child_by_field_name("function")
@@ -921,12 +1111,27 @@ def _record_call(call_node, caller_id: str, result: ParseResult,
     # Determine return_usage
     return_usage = _determine_return_usage(call_node)
 
+    # 0.2.6: infer receiver type for ``x.method()`` calls if we have a
+    # local-type map. Tries the longest receiver prefix first so
+    # ``self.store.get`` is resolved before falling back to ``self.store``.
+    receiver_type = ""
+    if local_types and "." in callee_text:
+        receiver = callee_text.rsplit(".", 1)[0]
+        while receiver:
+            if receiver in local_types:
+                receiver_type = local_types[receiver]
+                break
+            if "." not in receiver:
+                break
+            receiver = receiver.rsplit(".", 1)[0]
+
     raw_call = RawCall(
         caller_id=caller_id,
         callee_text=callee_text,
         line=line,
         error_handling=error_context,
         return_usage=return_usage,
+        receiver_type=receiver_type,
     )
     result.raw_calls.append(raw_call)
 

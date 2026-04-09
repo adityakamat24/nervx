@@ -398,6 +398,28 @@ def cmd_string_refs(args):
     store.close()
 
 
+def cmd_uses(args):
+    """0.2.6: ``nervx uses <identifier>`` — bare-token usage scan.
+
+    Deliberately separate from ``string-refs``: ``string-refs`` only
+    matches quoted-string literals (the rename case where the token
+    appears in a JSON key or Python dict subscript), while ``uses``
+    does a runtime regex sweep that catches attribute access,
+    assignments, type hints, destructuring, and match arms across every
+    language nervx's walker sees.
+    """
+    from nervx.attention.uses import find_identifier_uses, format_uses
+
+    repo_root = _resolve_repo(args)
+    result = find_identifier_uses(
+        repo_root,
+        args.identifier,
+        path_filter=args.path,
+        max_results=args.limit,
+    )
+    _emit(args, format_uses(result), result)
+
+
 def cmd_flows(args):
     """Flows command."""
     import json
@@ -1073,6 +1095,32 @@ def main():
     p_srefs.add_argument("--json", action="store_true", help="Emit JSON")
     p_srefs.add_argument("--repo", default=None, help="Repository path")
     p_srefs.set_defaults(func=cmd_string_refs)
+
+    # uses (0.2.6) — bare-token identifier scan across source files.
+    # Complements string-refs: string-refs finds "voted_for" quoted;
+    # uses finds vote.voted_for, voted_for = ..., {voted_for}, etc.
+    p_uses = subparsers.add_parser(
+        "uses",
+        help="Find every source-file line where an identifier is "
+             "referenced as a bare token (attribute access, assignments, "
+             "type hints, destructuring — complements string-refs).",
+    )
+    p_uses.add_argument(
+        "identifier",
+        help="Identifier to search for. Matches whole words only; "
+             "comments are skipped.",
+    )
+    p_uses.add_argument(
+        "--path", default=None,
+        help="Optional glob (e.g. 'src/**/*.py') to restrict the scan.",
+    )
+    p_uses.add_argument(
+        "--limit", type=int, default=500,
+        help="Maximum number of hits to return (default: 500).",
+    )
+    p_uses.add_argument("--json", action="store_true", help="Emit JSON")
+    p_uses.add_argument("--repo", default=None, help="Repository path")
+    p_uses.set_defaults(func=cmd_uses)
 
     # flows
     p_flows = subparsers.add_parser("flows", help="Show concept paths")

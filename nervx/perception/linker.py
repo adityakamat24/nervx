@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
@@ -61,6 +62,53 @@ def _module_to_file_paths(module_path: str) -> list[str]:
     return [f"{base}.py", f"{base}/__init__.py"]
 
 
+def collect_raw_imports(
+    parse_results: list[ParseResult],
+) -> list[tuple[str, str, str, int, str]]:
+    """Flatten every parsed ``RawImport`` into persistable rows.
+
+    0.2.6: the ``edges`` table only stores intra-project import resolutions
+    (Gap 2), so ``ask imports <file>`` used to miss every ``import numpy`` /
+    ``use std::io`` / ``using System;`` statement. This helper produces a
+    row per import — intra-project AND external — ready for
+    ``GraphStore.add_raw_imports_bulk``. The row tuple is:
+
+        (file_path, module_path, imported_names_json, is_from_import,
+         resolved_to_file)
+
+    ``resolved_to_file`` is populated when the module path maps to a file
+    we parsed; empty string otherwise (numpy, torch, std libs, ...).
+    """
+    all_files = {pr.file_path for pr in parse_results}
+    rows: list[tuple[str, str, str, int, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    for pr in parse_results:
+        for ri in pr.raw_imports:
+            resolved = ""
+            for pf in _module_to_file_paths(ri.module_path):
+                if pf in all_files:
+                    resolved = pf
+                    break
+
+            names_json = json.dumps(ri.imported_names or [])
+            # Dedupe on the primary-key tuple the table uses.
+            key = (ri.importer_file, ri.module_path, names_json)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            rows.append((
+                ri.importer_file,
+                ri.module_path,
+                names_json,
+                1 if ri.is_from_import else 0,
+                resolved,
+            ))
+
+    return rows
+
+
 def resolve_imports(
     parse_results: list[ParseResult],
     symbol_index: dict[str, list[Node]],
@@ -111,45 +159,76 @@ def resolve_calls(
     parse_results: list[ParseResult],
     symbol_index: dict[str, list[Node]],
 ) -> list[Edge]:
-    """Resolve raw calls into edges using disambiguation heuristics."""
+    """Resolve raw calls into edges using disambiguation heuristics.
+
+    0.2.6 — now fan-out capable. When disambiguation can't reduce a call to
+    exactly one target, the linker emits edges for every plausible candidate
+    with ``metadata.confidence = "low"``. Strict consumers (``ask calls``,
+    ``verify``, ``trace``) filter those out; lenient consumers (coverage,
+    ``callers``) count them so instance-method dispatch doesn't silently
+    drop callers just because the receiver type is ambiguous.
+    """
     import_map = _build_import_map(parse_results)
     edges: list[Edge] = []
+    # Dedupe per (caller, target, edge_type, confidence) — we want to keep
+    # a high-confidence edge AND a low-confidence one apart if they ever
+    # collide (they usually don't, because ``_resolve_candidates`` returns
+    # either a single high-conf or the full fan-out).
     seen: set[tuple[str, str, str]] = set()
 
     for pr in parse_results:
         for rc in pr.raw_calls:
-            target = _resolve_single_call(
+            targets, confidence = _resolve_candidates(
                 rc, pr.file_path, symbol_index, import_map,
             )
-            if target is None:
+            if not targets:
                 continue
 
-            key = (rc.caller_id, target.id, "calls")
-            if key in seen:
-                continue
-            seen.add(key)
+            for target in targets:
+                key = (rc.caller_id, target.id, "calls")
+                if key in seen:
+                    continue
+                seen.add(key)
 
-            meta = {}
-            if rc.error_handling:
-                meta["error_handling"] = rc.error_handling
+                meta: dict = {}
+                if rc.error_handling:
+                    meta["error_handling"] = rc.error_handling
+                # 0.2.6: every ``calls`` edge carries a confidence flag so
+                # downstream consumers can choose strict or lenient behavior.
+                meta["confidence"] = confidence
+                if rc.line:
+                    meta["line"] = rc.line
 
-            edges.append(Edge(
-                source_id=rc.caller_id,
-                target_id=target.id,
-                edge_type="calls",
-                metadata=meta,
-            ))
+                edges.append(Edge(
+                    source_id=rc.caller_id,
+                    target_id=target.id,
+                    edge_type="calls",
+                    metadata=meta,
+                ))
 
     return edges
 
 
-def _resolve_single_call(
+# 0.2.6: cap on fan-out size. A method name that clashes across 20 classes
+# shouldn't pollute the graph with 20 low-confidence edges — pick at most
+# ``_FANOUT_CAP`` candidates (prioritized by same-file/imported proximity).
+_FANOUT_CAP = 6
+
+
+def _resolve_candidates(
     rc: RawCall,
     caller_file: str,
     symbol_index: dict[str, list[Node]],
     import_map: dict[str, set[str]],
-) -> Node | None:
-    """Resolve a single RawCall to a target Node, or None if unresolved."""
+) -> tuple[list[Node], str]:
+    """Resolve a RawCall to a list of candidate targets + confidence tag.
+
+    Returns ``([], "")`` if nothing matched. Returns ``([t], "high")`` when
+    disambiguation narrows to a unique winner. Returns ``([t1, t2, ...], "low")``
+    when multiple same-named candidates remain and we can't pick one — the
+    caller emits an edge per candidate so lenient consumers (coverage,
+    callers count) still see the caller.
+    """
     callee = rc.callee_text
 
     # Step 1: Strip 'self.' prefix
@@ -157,7 +236,6 @@ def _resolve_single_call(
         callee = callee[5:]
 
     # Step 2: Take the last segment for qualified names
-    # e.g. "memory.store" -> "store", "self.state.get_player" -> "get_player"
     if "." in callee:
         qualifier = callee.rsplit(".", 1)[0]
         short_name = callee.rsplit(".", 1)[1]
@@ -168,11 +246,31 @@ def _resolve_single_call(
     # Step 3: Look up in symbol index
     candidates = symbol_index.get(short_name, [])
     if not candidates:
-        return None
+        return [], ""
 
-    # Step 4: Exactly one match
+    # Step 4: Exactly one match — high confidence.
     if len(candidates) == 1:
-        return candidates[0]
+        return [candidates[0]], "high"
+
+    # Step 3.5 (0.2.6): receiver-type filter. If the Python parser was able
+    # to infer the receiver class (``sp = SamplingParams(); sp.verify()`` →
+    # receiver_type="SamplingParams"), restrict candidates to methods whose
+    # parent class short-name matches. Works for every language whose
+    # parser populates ``receiver_type`` — today Python only; Java/C#
+    # future work is only a per-parser enhancement.
+    if rc.receiver_type:
+        typed = [
+            c for c in candidates
+            if c.kind == "method"
+            and c.parent_id
+            and c.parent_id.rsplit("::", 1)[-1].rsplit(".", 1)[-1] == rc.receiver_type
+        ]
+        if len(typed) == 1:
+            return [typed[0]], "high"
+        if len(typed) > 1:
+            # Same class name defined in two files — narrow further with the
+            # standard disambiguation below, but only across the typed subset.
+            candidates = typed
 
     # Step 5: Disambiguate
     caller_imports = import_map.get(caller_file, set())
@@ -181,16 +279,16 @@ def _resolve_single_call(
     # 5a: Prefer same file
     same_file = [c for c in candidates if c.file_path == caller_file]
     if len(same_file) == 1:
-        return same_file[0]
+        return [same_file[0]], "high"
 
     # 5b: Prefer symbols in files imported by the caller
-    imported_files = set()
+    imported_files: set[str] = set()
     for mod in caller_imports:
         for pf in _module_to_file_paths(mod):
             imported_files.add(pf)
     in_imported = [c for c in candidates if c.file_path in imported_files]
     if len(in_imported) == 1:
-        return in_imported[0]
+        return [in_imported[0]], "high"
 
     # 5c: Use qualifier to match against candidate node IDs
     if qualifier:
@@ -203,17 +301,45 @@ def _resolve_single_call(
         scored.sort(key=lambda x: -x[0])
         if scored and scored[0][0] > 0:
             if len(scored) == 1 or scored[0][0] > scored[1][0]:
-                return scored[0][1]
+                return [scored[0][1]], "high"
 
     # 5d: Prefer same top-level module
     if caller_module:
         same_module = [c for c in candidates
                        if c.file_path.startswith(caller_module + "/")]
         if len(same_module) == 1:
-            return same_module[0]
+            return [same_module[0]], "high"
 
-    # 5e: First match fallback
-    return candidates[0]
+    # 5f (0.2.6): fan-out. Disambiguation failed — instead of guessing one
+    # candidate and burying the rest (old behavior), return every plausible
+    # target as a low-confidence set. Prefer proximity: same-file, then
+    # imported files, then the rest, capped at ``_FANOUT_CAP``.
+    ordered: list[Node] = []
+    seen_ids: set[str] = set()
+
+    def _add(node: Node) -> None:
+        if node.id in seen_ids:
+            return
+        seen_ids.add(node.id)
+        ordered.append(node)
+
+    for c in same_file:
+        _add(c)
+    for c in in_imported:
+        _add(c)
+    for c in candidates:
+        _add(c)
+
+    if not ordered:
+        return [], ""
+
+    if len(ordered) == 1:
+        # All the proximity filters collapsed back to one candidate — this
+        # happens when ``candidates`` itself has duplicates or when the
+        # symbol index dedupe path was bypassed. High confidence.
+        return [ordered[0]], "high"
+
+    return ordered[:_FANOUT_CAP], "low"
 
 
 def resolve_inheritance(

@@ -238,7 +238,8 @@ tens to hundreds of tokens instead of thousands.
 
 | Command | What you get |
 |---------|--------------|
-| `nervx string-refs <identifier>` | every file:line where this identifier appears **as a quoted string literal** (e.g. `"user_id"` in JSON/YAML/Python dict keys). Does NOT match bare code tokens — use `nervx callers` or grep for class/function name references. |
+| `nervx string-refs <identifier>` | every file:line where this identifier appears **as a quoted string literal** (e.g. `"user_id"` in JSON/YAML/Python dict keys). Does NOT match bare code tokens. |
+| `nervx uses <identifier>` | every source line where this identifier appears **as a bare token** — attribute access (`vote.voted_for`), assignments, type hints, destructuring, match arms. Complements `string-refs` for cross-language renames. |
 
 ### WORKFLOW
 
